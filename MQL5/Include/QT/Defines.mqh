@@ -6,7 +6,7 @@
 #ifndef QT_DEFINES_MQH
 #define QT_DEFINES_MQH
 
-#define QT_EA_VERSION         "1.10"
+#define QT_EA_VERSION         "1.20"
 #define QT_TARGET_SYMBOL      "XAUUSD"
 #define QT_MTF_COUNT          6
 
@@ -104,6 +104,33 @@ enum ENUM_ENTRY_TYPE
    ENTRY_FVG_CE       = 0, // Limit at 50% Consequent Encroachment of FVG (Default)
    ENTRY_FVG_PROXIMAL = 1, // Limit at proximal edge of FVG
    ENTRY_MARKET_MSS   = 2  // Market execution on MSS candle close
+  };
+
+//+------------------------------------------------------------------+
+//| Daily AMDX / XAMD Cycle & ERL <-> IRL Liquidity Narrative Enums  |
+//+------------------------------------------------------------------+
+enum ENUM_DAILY_CYCLE_TYPE
+  {
+   CYCLE_UNKNOWN = 0,
+   CYCLE_AMDX    = 1, // Standard: Q1(Asia)=A, Q2(London)=M, Q3(NY_AM)=D, Q4(NY_PM)=X
+   CYCLE_XAMD    = 2  // Shifted : Q1(Asia)=X, Q2(London)=A, Q3(NY_AM)=M, Q4(NY_PM)=D
+  };
+
+enum ENUM_AMDX_PHASE
+  {
+   PHASE_NONE = 0,
+   PHASE_A    = 1, // Accumulation (Builds Phase A Swing High & Swing Low)
+   PHASE_M    = 2, // Manipulation (Sweep of Phase A High/Low -> Extreme Top/Bottom Entry)
+   PHASE_D    = 3, // Distribution (Real Expansion after Phase M Sweep -> Low-Risk Entry)
+   PHASE_X    = 4  // Continuation / Reversal
+  };
+
+enum ENUM_LIQ_NARRATIVE
+  {
+   NARRATIVE_NONE       = 0,
+   NARRATIVE_ERL_TO_IRL = 1, // Swept External Range Liquidity -> targeting Internal Range Liquidity
+   NARRATIVE_IRL_TO_ERL = 2, // Rebalanced Internal Range Liquidity -> targeting External Range Liquidity
+   NARRATIVE_ERL_TO_ERL = 3  // Swept Phase A Low/High (ERL) -> targeting opposing Phase A High/Low (ERL)
   };
 
 //+------------------------------------------------------------------+
@@ -286,6 +313,39 @@ string QTBiasToString(const ENUM_BIAS_DIR b)
    if(b > 0) return "BULL";
    if(b < 0) return "BEAR";
    return "NEUTRAL";
+  }
+
+string QTDailyCycleToString(const ENUM_DAILY_CYCLE_TYPE c)
+  {
+   switch(c)
+     {
+      case CYCLE_AMDX: return "AMDX";
+      case CYCLE_XAMD: return "XAMD";
+      default:         return "UNKNOWN";
+     }
+  }
+
+string QTAmdxPhaseToString(const ENUM_AMDX_PHASE p)
+  {
+   switch(p)
+     {
+      case PHASE_A: return "PHASE_A";
+      case PHASE_M: return "PHASE_M";
+      case PHASE_D: return "PHASE_D";
+      case PHASE_X: return "PHASE_X";
+      default:      return "NONE";
+     }
+  }
+
+string QTNarrativeToString(const ENUM_LIQ_NARRATIVE n)
+  {
+   switch(n)
+     {
+      case NARRATIVE_ERL_TO_IRL: return "ERL_TO_IRL";
+      case NARRATIVE_IRL_TO_ERL: return "IRL_TO_ERL";
+      case NARRATIVE_ERL_TO_ERL: return "ERL_TO_ERL";
+      default:                   return "NONE";
+     }
   }
 
 //+------------------------------------------------------------------+

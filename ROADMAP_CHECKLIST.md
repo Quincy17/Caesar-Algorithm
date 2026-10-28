@@ -282,6 +282,14 @@ Tujuan: Menguji performa dan validitas aturan secara statistik di Strategy Teste
       - **Tahap 1 (`+65 Pips` / `$6.50`):** Geser `SL` ke *Break-Even* (`entryPrice +/- buffer`) saat *running profit* mencapai `+65 pips` (`InpBreakEvenPips = 65.0`) untuk menyelamatkan posisi yang sudah lari `+67 s/d +95 pips` (`> 1.1R`) agar tidak berbalik menjadi `-1R` (`SL_HIT`).
       - **Tahap 2 (`+100 Pips` / `$10.00`):** Eksekusi *Mandatory Partial Close 50%* (`PARTIAL_TP1`) saat *running profit* mencapai `+100 pips` (`InpPartialTp1Pips = 100.0`), menyisakan 50% *runner* bebas risiko menuju `+300 pips` (`$30.00`) / HTF DOL.
     - **Perbaikan Filter Reversal Bias & Siklus Hidup Zona `RBS`/`SBR` (`Bias.mqh` & `MSNR_Levels.mqh`):** Cegah `rejH4` membuka posisi *counter-trend* melawan arah `biasD1`, serta wajibkan minimal 1 candle tutup di luar zona (`hasLeftZone`) setelah *breakout* sebelum *retest* menandai zona `RBS`/`SBR` sebagai `USED`.
+  - [x] **Backtest Iterasi 3 (`report-3`, `v1.12`: +$959.98, PF 1.65, 27 trades) & Daily Cycle Engine (`v1.20`):**
+    - **Fallback Limit → Market (`Exec.mqh`):** Saat `OrderSend` mengembalikan `10015`/`10016` dan harga live sudah menyentuh/melewati harga limit (≤ `15 pips`), order otomatis dieksekusi *Market* agar setup valid tidak hilang.
+    - **Klasifikasi Siklus Harian `AMDX` / `XAMD` (`Defines.mqh` & `Bias.mqh`):** Enum `ENUM_DAILY_CYCLE_TYPE`, `ENUM_AMDX_PHASE`, `ENUM_LIQ_NARRATIVE`; tracking `Phase A High/Low`, deteksi *manipulation sweep* (single & multi-candle), dan pembukaan gate bias saat sweep Fase M didukung minimal satu bias HTF (`D1`/`H4`) atau posisi Discount/Premium True Open.
+    - **Entry Fase M (ekstrem) & Fase D (pullback IRL) (`Setup.mqh`):** POI `M15`/`M5` diizinkan khusus dalam konteks siklus harian (maks 1 trade LTF siklus per hari Daye), SL Fase M dijangkar di ekstrem sweep, tolak SL struktural LTF `< 18 pips` (noise), dan minimum Confluence Score LTF `≥ 8`.
+    - **Naratif Likuiditas:** Label `ERL→IRL`, `IRL→ERL`, `ERL→ERL` disimpan di setup & `dolLabel`.
+    - **Target Harian:** TP = `Swing High Fase A` (BUY) / `Swing Low Fase A` (SELL) bila jarak ≥ `max(SL × minRR, 115 pips)`; jika tidak, fallback ke HTF DOL / `RUNNER_300P`. Lot paten (`0.05`/`$5k`), SL `45–75 pips`, BE `+65 pips`, dan Partial 50% `+100 pips` tidak berubah.
+    - **Input EA baru:** `InpEnableDailyAmdxCycle = true` (versi EA `1.20`).
+  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-implementasi `v1.20` (target frekuensi trade jauh di atas 27 trade / 10 bulan).
   - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-kalibrasi `v1.12`.
   - [ ] Pemisahan periode data menjadi **In-Sample (IS)** dan **Out-of-Sample (OOS)**.
 - [x] **Script Analisis Statistik & Validasi Asumsi QT (`AnalyzeBacktestCSV.mq5`)**

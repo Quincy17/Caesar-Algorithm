@@ -40,39 +40,90 @@ struct SDOLTarget
      }
   };
 
+struct SDailyCycleState
+  {
+   bool                  isActive;
+   ENUM_DAILY_CYCLE_TYPE cycleType;          // CYCLE_AMDX or CYCLE_XAMD
+   ENUM_AMDX_PHASE       currentPhase;       // PHASE_A, PHASE_M, PHASE_D, PHASE_X
+   ENUM_LIQ_NARRATIVE    narrative;          // NARRATIVE_ERL_TO_ERL, IRL_TO_ERL, ERL_TO_IRL
+   string                phaseALabel;        // "ASIA_A" or "LONDON_A"
+   double                phaseAHigh;         // Swing High of Phase A (Target for BUY)
+   double                phaseALow;          // Swing Low of Phase A (Target for SELL)
+   double                phaseAMid;          // 50% Equilibrium of Phase A range
+   datetime              phaseAEndServer;    // Server timestamp when Phase A ended
+   bool                  phaseAHighSwept;    // True if Phase A High was swept in Phase M
+   bool                  phaseALowSwept;     // True if Phase A Low was swept in Phase M
+   double                highSweepExtreme;   // Highest wick during Phase A High manipulation
+   double                lowSweepExtreme;    // Lowest wick during Phase A Low manipulation
+   datetime              highSweepTime;      // Bar timestamp of Phase A High sweep
+   datetime              lowSweepTime;       // Bar timestamp of Phase A Low sweep
+   ENUM_BIAS_DIR         manipulationDir;    // BIAS_BEAR (after High sweep) or BIAS_BULL (after Low sweep)
+   double                activeSweepLevel;   // Swept Phase A boundary price
+   double                activeSweepExtreme; // Extreme wick price of active sweep (for SL)
+   datetime              activeSweepTime;    // Bar timestamp of active sweep
+   double                phaseATargetPrice;  // Opposing Phase A boundary (phaseAHigh for BUY, phaseALow for SELL)
+
+   void Reset()
+     {
+      isActive           = false;
+      cycleType          = CYCLE_AMDX;
+      currentPhase       = PHASE_NONE;
+      narrative          = NARRATIVE_NONE;
+      phaseALabel        = "";
+      phaseAHigh         = 0.0;
+      phaseALow          = 0.0;
+      phaseAMid          = 0.0;
+      phaseAEndServer    = 0;
+      phaseAHighSwept    = false;
+      phaseALowSwept     = false;
+      highSweepExtreme   = 0.0;
+      lowSweepExtreme    = 0.0;
+      highSweepTime      = 0;
+      lowSweepTime       = 0;
+      manipulationDir    = BIAS_NEUTRAL;
+      activeSweepLevel   = 0.0;
+      activeSweepExtreme = 0.0;
+      activeSweepTime    = 0;
+      phaseATargetPrice  = 0.0;
+     }
+  };
+
 struct SBiasState
   {
-   ENUM_BIAS_DIR biasW1;
-   ENUM_BIAS_DIR biasD1;
-   ENUM_BIAS_DIR biasH4;
+   ENUM_BIAS_DIR    biasW1;
+   ENUM_BIAS_DIR    biasD1;
+   ENUM_BIAS_DIR    biasH4;
 
-   ENUM_BIAS_DIR structW1;
-   ENUM_BIAS_DIR structD1;
-   ENUM_BIAS_DIR structH4;
+   ENUM_BIAS_DIR    structW1;
+   ENUM_BIAS_DIR    structD1;
+   ENUM_BIAS_DIR    structH4;
 
    // H4 Dealing Range (most recent confirmed Swing High & Swing Low on H4)
-   double        h4RangeHigh;
-   double        h4RangeLow;
-   double        h4Equilibrium; // 50% of H4 dealing range
-   bool          isH4Discount;  // Current price < h4Equilibrium
-   bool          isH4Premium;   // Current price > h4Equilibrium
+   double           h4RangeHigh;
+   double           h4RangeLow;
+   double           h4Equilibrium; // 50% of H4 dealing range
+   bool             isH4Discount;  // Current price < h4Equilibrium
+   bool             isH4Premium;   // Current price > h4Equilibrium
 
    // True Open Premium / Discount Context (for Confluence Score +1 each)
-   bool          isBelowTrueDayOpen;  // Discount relative to 00:00 NY
-   bool          isAboveTrueDayOpen;  // Premium relative to 00:00 NY
-   bool          isBelowTrueWeekOpen; // Discount relative to Mon 18:00 NY
-   bool          isAboveTrueWeekOpen; // Premium relative to Mon 18:00 NY
+   bool             isBelowTrueDayOpen;  // Discount relative to 00:00 NY
+   bool             isAboveTrueDayOpen;  // Premium relative to 00:00 NY
+   bool             isBelowTrueWeekOpen; // Discount relative to Mon 18:00 NY
+   bool             isAboveTrueWeekOpen; // Premium relative to Mon 18:00 NY
 
    // Overall Trade Direction permitted by active Trade Profile Gate
-   bool          allowBuy;
-   bool          allowSell;
-   ENUM_BIAS_DIR storylineDir;        // Dominant direction (BIAS_BULL, BIAS_BEAR, or BIAS_NEUTRAL)
+   bool             allowBuy;
+   bool             allowSell;
+   ENUM_BIAS_DIR    storylineDir;        // Dominant direction (BIAS_BULL, BIAS_BEAR, or BIAS_NEUTRAL)
+
+   // Daily AMDX / XAMD Cycle & ERL <-> IRL Narrative State
+   SDailyCycleState dailyCycle;
 
    // Draw on Liquidity (DOL) & Internal Roadblocks per direction
-   SDOLTarget    bullDOL;             // Primary upside objective for BUY
-   SDOLTarget    bullInternalTP1;     // Nearest internal upside liquidity / roadblock for 50% partial
-   SDOLTarget    bearDOL;             // Primary downside objective for SELL
-   SDOLTarget    bearInternalTP1;     // Nearest internal downside liquidity / roadblock for 50% partial
+   SDOLTarget       bullDOL;             // Primary upside objective for BUY
+   SDOLTarget       bullInternalTP1;     // Nearest internal upside liquidity / roadblock for 50% partial
+   SDOLTarget       bearDOL;             // Primary downside objective for SELL
+   SDOLTarget       bearInternalTP1;     // Nearest internal downside liquidity / roadblock for 50% partial
 
    void Reset()
      {
@@ -94,6 +145,7 @@ struct SBiasState
       allowBuy            = false;
       allowSell           = false;
       storylineDir        = BIAS_NEUTRAL;
+      dailyCycle.Reset();
       bullDOL.Reset();
       bullInternalTP1.Reset();
       bearDOL.Reset();
@@ -365,6 +417,249 @@ private:
          outPrimaryDOL = outInternalTP1;
      }
 
+   //+------------------------------------------------------------------+
+   //| Evaluate a Single Phase A Range [aStartSrv, aEndSrv) & Post-A    |
+   //| Manipulation Sweeps (Phase M) and Distribution (Phase D)         |
+   //+------------------------------------------------------------------+
+   static bool       EvaluatePhaseARangeSweep(const MqlRates &m5Rates[],
+                                              const int m5Cnt,
+                                              const datetime aStartSrv,
+                                              const datetime aEndSrv,
+                                              const ENUM_DAILY_CYCLE_TYPE cycType,
+                                              const string label,
+                                              const double atrH1,
+                                              SDailyCycleState &outCycle)
+     {
+      outCycle.Reset();
+      if(m5Cnt <= 2 || aEndSrv <= aStartSrv || m5Rates[0].time < aEndSrv)
+         return false;
+
+      double aHigh  = -DBL_MAX;
+      double aLow   =  DBL_MAX;
+      int    aBars  = 0;
+
+      for(int i = m5Cnt - 1; i >= 0; i--)
+        {
+         if(m5Rates[i].time >= aStartSrv && m5Rates[i].time < aEndSrv)
+           {
+            if(m5Rates[i].high > aHigh) aHigh = m5Rates[i].high;
+            if(m5Rates[i].low  < aLow)  aLow  = m5Rates[i].low;
+            aBars++;
+           }
+        }
+
+      if(aBars < 4 || aHigh <= aLow)
+         return false;
+
+      double aRange = aHigh - aLow;
+      double aMid   = (aHigh + aLow) * 0.5;
+
+      outCycle.cycleType       = cycType;
+      outCycle.phaseALabel     = label;
+      outCycle.phaseAHigh      = aHigh;
+      outCycle.phaseALow       = aLow;
+      outCycle.phaseAMid       = aMid;
+      outCycle.phaseAEndServer = aEndSrv;
+
+      // Scan closed M5 bars from aEndSrv forward to newest closed bar (index 0)
+      bool     hiSwept         = false;
+      bool     loSwept         = false;
+      double   hiExtreme       = aHigh;
+      double   loExtreme       = aLow;
+      datetime hiSweepTime     = 0;
+      datetime loSweepTime     = 0;
+      bool     hiTargetReached = false;
+      bool     loTargetReached = false;
+
+      for(int i = m5Cnt - 1; i >= 0; i--)
+        {
+         if(m5Rates[i].time < aEndSrv)
+            continue;
+
+         // 1. Check Buy-Side ERL Sweep (above Phase A High -> Bearish Manipulation)
+         if(m5Rates[i].high > aHigh)
+           {
+            if(!hiSwept || hiTargetReached)
+              {
+               hiSwept         = true;
+               hiTargetReached = false;
+               hiExtreme       = m5Rates[i].high;
+               hiSweepTime     = m5Rates[i].time;
+              }
+            else if(m5Rates[i].high >= hiExtreme)
+              {
+               hiExtreme   = m5Rates[i].high;
+               hiSweepTime = m5Rates[i].time;
+              }
+           }
+         else if(hiSwept && m5Rates[i].low <= aLow)
+           {
+            // Full ERL-to-ERL move from Phase A High to Phase A Low already completed
+            hiTargetReached = true;
+           }
+
+         // 2. Check Sell-Side ERL Sweep (below Phase A Low -> Bullish Manipulation)
+         if(m5Rates[i].low < aLow)
+           {
+            if(!loSwept || loTargetReached)
+              {
+               loSwept         = true;
+               loTargetReached = false;
+               loExtreme       = m5Rates[i].low;
+               loSweepTime     = m5Rates[i].time;
+              }
+            else if(m5Rates[i].low <= loExtreme)
+              {
+               loExtreme   = m5Rates[i].low;
+               loSweepTime = m5Rates[i].time;
+              }
+           }
+         else if(loSwept && m5Rates[i].high >= aHigh)
+           {
+            // Full ERL-to-ERL move from Phase A Low to Phase A High already completed
+            loTargetReached = true;
+           }
+        }
+
+      double curClose   = m5Rates[0].close;
+      double maxExcur   = MathMax(aRange * 0.85, 1.50 * MathMax(5.0, atrH1));
+
+      bool validBearManip = (hiSwept && !hiTargetReached &&
+                             (hiExtreme - aHigh) <= maxExcur &&
+                             curClose <= aHigh + 0.25 * MathMax(4.0, atrH1) &&
+                             curClose >  aLow  + 0.25 * aRange);
+
+      bool validBullManip = (loSwept && !loTargetReached &&
+                             (aLow - loExtreme) <= maxExcur &&
+                             curClose >= aLow  - 0.25 * MathMax(4.0, atrH1) &&
+                             curClose <  aHigh - 0.25 * aRange);
+
+      outCycle.phaseAHighSwept  = validBearManip;
+      outCycle.phaseALowSwept   = validBullManip;
+      outCycle.highSweepExtreme = hiExtreme;
+      outCycle.lowSweepExtreme  = loExtreme;
+      outCycle.highSweepTime    = hiSweepTime;
+      outCycle.lowSweepTime     = loSweepTime;
+
+      if(!validBearManip && !validBullManip)
+         return false;
+
+      // If both sides were swept and neither target reached, choose the most recent manipulation
+      ENUM_BIAS_DIR chosenDir = BIAS_NEUTRAL;
+      if(validBearManip && validBullManip)
+         chosenDir = (hiSweepTime >= loSweepTime ? BIAS_BEAR : BIAS_BULL);
+      else if(validBearManip)
+         chosenDir = BIAS_BEAR;
+      else
+         chosenDir = BIAS_BULL;
+
+      outCycle.isActive        = true;
+      outCycle.manipulationDir = chosenDir;
+
+      if(chosenDir == BIAS_BEAR)
+        {
+         outCycle.activeSweepLevel   = aHigh;
+         outCycle.activeSweepExtreme = hiExtreme;
+         outCycle.activeSweepTime    = hiSweepTime;
+         outCycle.phaseATargetPrice  = aLow;  // SELL targets Phase A Swing Low!
+
+         int barsSinceSweep = (int)((m5Rates[0].time - hiSweepTime) / 300);
+         if(barsSinceSweep <= 12 || curClose >= aHigh - 0.30 * aRange)
+            outCycle.currentPhase = PHASE_M;  // Manipulation Extreme Top Entry
+         else
+            outCycle.currentPhase = PHASE_D;  // Distribution Pullback Entry
+        }
+      else
+        {
+         outCycle.activeSweepLevel   = aLow;
+         outCycle.activeSweepExtreme = loExtreme;
+         outCycle.activeSweepTime    = loSweepTime;
+         outCycle.phaseATargetPrice  = aHigh; // BUY targets Phase A Swing High!
+
+         int barsSinceSweep = (int)((m5Rates[0].time - loSweepTime) / 300);
+         if(barsSinceSweep <= 12 || curClose <= aLow + 0.30 * aRange)
+            outCycle.currentPhase = PHASE_M;  // Manipulation Extreme Bottom Entry
+         else
+            outCycle.currentPhase = PHASE_D;  // Distribution Pullback Entry
+        }
+
+      outCycle.narrative = (outCycle.currentPhase == PHASE_M ? NARRATIVE_ERL_TO_ERL : NARRATIVE_IRL_TO_ERL);
+      return true;
+     }
+
+   //+------------------------------------------------------------------+
+   //| Master Evaluator: AMDX vs XAMD Daily Cycle & ERL <-> IRL         |
+   //+------------------------------------------------------------------+
+   static void       EvaluateDailyCycleAndNarrative(const MqlRates &m5Rates[],
+                                                    const int m5Cnt,
+                                                    const QTState &qtState,
+                                                    const double atrH1,
+                                                    SDailyCycleState &outState)
+     {
+      outState.Reset();
+      if(m5Cnt <= 2 || qtState.dayeDayStartNY <= 0)
+         return;
+
+      datetime dayStartSrv = (datetime)((long)qtState.dayeDayStartNY - (long)qtState.nyOffsetFromServer);
+      datetime q1StartSrv  = dayStartSrv;                        // 18:00 NY (Asia Q1)
+      datetime q1EndSrv    = (datetime)((long)dayStartSrv + 6 * 3600);  // 00:00 NY (London Q2 start)
+      datetime q2StartSrv  = q1EndSrv;
+      datetime q2EndSrv    = (datetime)((long)dayStartSrv + 12 * 3600); // 06:00 NY (NY AM Q3 start)
+
+      // 1. Evaluate Standard AMDX Cycle (Phase A = Q1 Asia [18:00 - 00:00 NY))
+      SDailyCycleState amdxCycle;
+      bool hasAmdx = EvaluatePhaseARangeSweep(m5Rates, m5Cnt, q1StartSrv, q1EndSrv,
+                                              CYCLE_AMDX, "ASIA_A", atrH1, amdxCycle);
+
+      // 2. When in NY AM (Q3) or NY PM (Q4), also evaluate Shifted XAMD Cycle (Phase A = Q2 London [00:00 - 06:00 NY))
+      SDailyCycleState xamdCycle;
+      bool hasXamd = false;
+      if(qtState.session >= QT_SESSION_NY_AM)
+        {
+         hasXamd = EvaluatePhaseARangeSweep(m5Rates, m5Cnt, q2StartSrv, q2EndSrv,
+                                            CYCLE_XAMD, "LONDON_A", atrH1, xamdCycle);
+        }
+
+      if(hasAmdx && hasXamd)
+        {
+         // If both Asia and London sweeps align in the same direction, merge for widest Phase A target & safest SL extreme
+         if(amdxCycle.manipulationDir == xamdCycle.manipulationDir)
+           {
+            outState = xamdCycle;
+            if(outState.manipulationDir == BIAS_BULL)
+              {
+               outState.activeSweepExtreme = MathMin(amdxCycle.activeSweepExtreme, xamdCycle.activeSweepExtreme);
+               outState.phaseAHigh         = MathMax(amdxCycle.phaseAHigh, xamdCycle.phaseAHigh);
+               outState.phaseATargetPrice  = outState.phaseAHigh;
+              }
+            else
+              {
+               outState.activeSweepExtreme = MathMax(amdxCycle.activeSweepExtreme, xamdCycle.activeSweepExtreme);
+               outState.phaseALow          = MathMin(amdxCycle.phaseALow, xamdCycle.phaseALow);
+               outState.phaseATargetPrice  = outState.phaseALow;
+              }
+           }
+         else
+           {
+            // Prefer the fresher manipulation sweep (typically NY AM manipulation of London range in XAMD)
+            outState = (xamdCycle.activeSweepTime >= amdxCycle.activeSweepTime ? xamdCycle : amdxCycle);
+           }
+        }
+      else if(hasXamd)
+         outState = xamdCycle;
+      else if(hasAmdx)
+         outState = amdxCycle;
+      else
+        {
+         // Even if no Phase A sweep is active yet, set baseline narrative & phase
+         outState.cycleType    = CYCLE_AMDX;
+         outState.currentPhase = (qtState.session == QT_SESSION_ASIA   ? PHASE_A :
+                                 (qtState.session == QT_SESSION_LONDON ? PHASE_M :
+                                 (qtState.session == QT_SESSION_NY_AM  ? PHASE_D : PHASE_X)));
+         outState.narrative    = NARRATIVE_IRL_TO_ERL;
+        }
+     }
+
 public:
                      CBiasEngine()
      {
@@ -467,7 +762,18 @@ public:
            }
         }
 
-      // 5. Evaluate Trade Profile Bias Gates for BUY and SELL
+      // 5. Evaluate Daily AMDX / XAMD Cycle & ERL <-> IRL Liquidity Narrative
+      double atrH1 = MathMax(1.0, mtf.GetATR(TF_IDX_H1));
+      EvaluateDailyCycleAndNarrative(m5Rates, m5Cnt, qtState, atrH1, m_state.dailyCycle);
+      if(m_state.dailyCycle.narrative == NARRATIVE_NONE)
+        {
+         if(rejD1 != BIAS_NEUTRAL || rejH4 != BIAS_NEUTRAL)
+            m_state.dailyCycle.narrative = NARRATIVE_ERL_TO_IRL;
+         else
+            m_state.dailyCycle.narrative = NARRATIVE_IRL_TO_ERL;
+        }
+
+      // 6. Evaluate Trade Profile Bias Gates for BUY and SELL
       m_state.allowBuy  = profileSpec.CheckBiasGate(BIAS_BULL, m_state.biasW1, m_state.biasD1, m_state.biasH4);
       m_state.allowSell = profileSpec.CheckBiasGate(BIAS_BEAR, m_state.biasW1, m_state.biasD1, m_state.biasH4);
 
@@ -477,6 +783,24 @@ public:
          m_state.allowBuy = true;
       if(rejD1 == BIAS_BEAR || (rejH4 == BIAS_BEAR && m_state.biasD1 == BIAS_BEAR))
          m_state.allowSell = true;
+
+      // Daily AMDX / XAMD Cycle Rule: When Phase A High/Low has been swept in Phase M or Phase D,
+      // unlock directional setup if supported by at least one HTF structure (D1 or H4) or HTF True Open Discount/Premium
+      if(m_state.dailyCycle.isActive)
+        {
+         if(m_state.dailyCycle.manipulationDir == BIAS_BULL &&
+            (m_state.biasD1 == BIAS_BULL || m_state.biasH4 == BIAS_BULL ||
+             (m_state.isBelowTrueDayOpen && m_state.isBelowTrueWeekOpen)))
+           {
+            m_state.allowBuy = true;
+           }
+         if(m_state.dailyCycle.manipulationDir == BIAS_BEAR &&
+            (m_state.biasD1 == BIAS_BEAR || m_state.biasH4 == BIAS_BEAR ||
+             (m_state.isAboveTrueDayOpen && m_state.isAboveTrueWeekOpen)))
+           {
+            m_state.allowSell = true;
+           }
+        }
 
       if(m_state.allowBuy && !m_state.allowSell)
          m_state.storylineDir = BIAS_BULL;

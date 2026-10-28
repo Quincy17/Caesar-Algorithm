@@ -18,7 +18,7 @@
 //|  - M12 Friday Flat       : Mandatory Friday 15:00 NY Flat        |
 //+------------------------------------------------------------------+
 #property copyright "Caesar Algorithm - QT-MSNR-ICT"
-#property version   "1.12"
+#property version   "1.20"
 #property strict
 
 #include "../Include/QT/Defines.mqh"
@@ -79,6 +79,7 @@ input int                 InpMSNRMaxLevelsPerTF = 20;                         //
 input int                 InpMSNRMaxAgeBars     = 250;                        // Max Level Age in Bars per TF
 input int                 InpMaxQMBodyBreak     = 2;                          // Max Body Breaks in QM Pattern
 input bool                InpUseM15M5Refinement = true;                       // Enable M15/M5 POI Refinement for Precision Entry
+input bool                InpEnableDailyAmdxCycle = true;                     // Enable Daily AMDX/XAMD Phase M & Phase D Entries
 
 input group "=== 4. M5: ICT Liquidity, Sweep, MSS & FVG ==="
 input double              InpEqToleranceAtrMult = 0.10;                       // EQH/EQL Max Diff = mult * ATR(14)
@@ -263,6 +264,7 @@ int OnInit()
    setCfg.slBufferAtrMultM5  = InpSlBufferAtrM5;
    setCfg.maxSlAtrMultH1     = InpMaxSlAtrH1;
    setCfg.useM15M5Refinement = InpUseM15M5Refinement;
+   setCfg.enableDailyAmdxCycle = InpEnableDailyAmdxCycle;
    setCfg.targetSlPips       = InpTargetSlPips;
    setCfg.minSlPips          = InpMinSlPips;
    setCfg.maxSlPips          = InpMaxSlPips;

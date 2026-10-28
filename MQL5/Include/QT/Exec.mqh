@@ -1137,8 +1137,11 @@ public:
         }
 
       bool sent = false;
-      for(int attempt = 0; attempt < MathMax(1, m_cfg.maxRetries); attempt++)
+      for(int attempt = 0; attempt < MathMax(2, m_cfg.maxRetries); attempt++)
         {
+         ask = SymbolInfoDouble(m_symbol, SYMBOL_ASK);
+         bid = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+
          if(useMarket)
            {
             if(tr.direction == BIAS_BULL)
@@ -1158,6 +1161,26 @@ public:
             break;
 
          uint ret = m_trade.ResultRetcode();
+         // Fallback from Limit to Market if live price touched/crossed limit price (10015 Invalid Price / 10016 Invalid Stops)
+         if(!useMarket && (ret == TRADE_RETCODE_INVALID_PRICE || ret == TRADE_RETCODE_INVALID_STOPS))
+           {
+            double maxSlipDist = QTPipsToPrice(m_symbol, 15.0);
+            if(tr.direction == BIAS_BULL &&
+               MathAbs(ask - entryNorm) <= maxSlipDist &&
+               bid > slNorm + minStopDist && ask < tpNorm - minStopDist)
+              {
+               useMarket = true;
+               continue;
+              }
+            if(tr.direction == BIAS_BEAR &&
+               MathAbs(bid - entryNorm) <= maxSlipDist &&
+               ask < slNorm - minStopDist && bid > tpNorm + minStopDist)
+              {
+               useMarket = true;
+               continue;
+              }
+           }
+
          if(ret != TRADE_RETCODE_REQUOTE && ret != TRADE_RETCODE_PRICE_OFF)
             break;
          Sleep(100);
