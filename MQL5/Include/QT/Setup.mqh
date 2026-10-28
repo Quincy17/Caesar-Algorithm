@@ -175,7 +175,60 @@ private:
    bool              m_hasNewLogEvent;
    int               m_seqCounter;
 
-   //--- Find best touched Fresh POI on allowed timeframes (prioritizing HTF + M15/M5 refinement)
+   //--- Find a Fresh M15/M5 MSNR POI nested inside an HTF (W1/D1/H4/H1) Body-to-Wick Anchor Zone
+   bool              FindNestedRefinedPOI(const SMSNRLevel &anchor,
+                                          CMSNREngine &msnr,
+                                          const double refPrice,
+                                          SMSNRLevel &outRefined) const
+     {
+      outRefined.Reset();
+      if(anchor.tfIdx > TF_IDX_H1)
+         return false; // Anchor is already LTF (M15/M5)
+
+      double zoneSpan = MathMax(anchor.tolerance * 2.0, anchor.zoneHigh - anchor.zoneLow);
+      double nestLow  = anchor.zoneLow  - zoneSpan * 0.35;
+      double nestHigh = anchor.zoneHigh + zoneSpan * 0.35;
+
+      bool found = false;
+      int  bestPriority = -1; // 2 = QM/Flip, 1 = Classic A/V
+      double bestDist   = DBL_MAX;
+
+      int ltfList[2] = { TF_IDX_M15, TF_IDX_M5 };
+      for(int k = 0; k < 2; k++)
+        {
+         int tf = ltfList[k];
+         int cnt = msnr.GetLevelCount(tf);
+         for(int i = 0; i < cnt; i++)
+           {
+            SMSNRLevel lvl;
+            if(!msnr.GetLevel(tf, i, lvl))
+               continue;
+            if(lvl.direction != anchor.direction || !lvl.IsFreshForEntry(3))
+               continue;
+
+            // Check if LTF POI price or zone is nested inside the HTF Body-to-Wick Anchor Zone
+            bool isNested = (lvl.price >= nestLow && lvl.price <= nestHigh) ||
+                            (lvl.zoneLow <= anchor.zoneHigh && lvl.zoneHigh >= anchor.zoneLow);
+            if(!isNested)
+               continue;
+
+            int prio = ((lvl.type == POI_QM_BULL || lvl.type == POI_QM_BEAR ||
+                         lvl.type == POI_RBS     || lvl.type == POI_SBR) ? 2 : 1);
+            double d = MathAbs(lvl.price - refPrice);
+
+            if(prio > bestPriority || (prio == bestPriority && d < bestDist))
+              {
+               bestPriority = prio;
+               bestDist     = d;
+               outRefined   = lvl;
+               found        = true;
+              }
+           }
+        }
+      return found;
+     }
+
+   //--- Find best touched Fresh POI on allowed timeframes (prioritizing HTF + M15/M5 nested refinement)
    bool              FindTouchedPOI(const ENUM_BIAS_DIR dir,
                                     const MqlRates &m5Bar,
                                     CMSNREngine &msnr,
@@ -193,7 +246,7 @@ private:
       bool foundAnchor = false;
       double proximityMargin = m5Bar.high - m5Bar.low;
 
-      // Scan from highest TF (W1=0) to lowest TF (M5=5) so HTF anchor is captured first
+      // 1. Scan from highest TF (W1=0) to lowest TF (M5=5) so HTF Body-to-Wick Anchor is captured first
       for(int tf = TF_IDX_W1; tf < QT_MTF_COUNT; tf++)
         {
          if(!prof.allowPOITF[tf])
@@ -208,35 +261,32 @@ private:
             if(lvl.direction != dir || !lvl.IsFreshForEntry(3))
                continue;
 
-            // Check if M5 closed bar touched or is within proximity of POI zone
-            bool touched = (m5Bar.low <= lvl.zoneHigh + proximityMargin * 0.25 &&
-                            m5Bar.high >= lvl.zoneLow - proximityMargin * 0.25);
+            // Check if M5 closed bar touched or entered the MSNR Body-to-Wick Zone [zoneLow, zoneHigh]
+            bool touched = (m5Bar.low <= lvl.zoneHigh + proximityMargin * 0.20 &&
+                            m5Bar.high >= lvl.zoneLow - proximityMargin * 0.20);
             if(!touched)
                continue;
 
-            // Ensure body close did NOT already break through the POI
+            // Ensure body close did NOT already break past the distal wick of the POI zone
             if(dir == BIAS_BULL && m5Bar.close < lvl.zoneLow)
                continue;
             if(dir == BIAS_BEAR && m5Bar.close > lvl.zoneHigh)
                continue;
 
-            if(!foundAnchor)
-              {
-               outAnchor   = lvl;
-               foundAnchor = true;
-               break;
-              }
-            else if(m_cfg.useM15M5Refinement && (tf == TF_IDX_M15 || tf == TF_IDX_M5) && !outHasRefined)
-              {
-               // Found an M15/M5 refined POI while inside an HTF (H4/H1) POI!
-               outRefined    = lvl;
-               outHasRefined = true;
-              }
+            outAnchor   = lvl;
+            foundAnchor = true;
+            break;
            }
+         if(foundAnchor)
+            break;
         }
 
+      // 2. If HTF Anchor found, search for a Nested M15/M5 Refined POI inside the HTF Body-to-Wick Zone
       if(foundAnchor)
         {
+         if(m_cfg.useM15M5Refinement && outAnchor.tfIdx <= TF_IDX_H1)
+            outHasRefined = FindNestedRefinedPOI(outAnchor, msnr, m5Bar.close, outRefined);
+
          outOverlaps = msnr.CountMultiTFOverlaps(outAnchor);
          if(outHasRefined && outOverlaps < 2)
             outOverlaps = MathMin(2, outOverlaps + 1);
@@ -421,25 +471,24 @@ private:
            }
         }
 
+      // Refresh nested M15/M5 Refined POI inside HTF Anchor Zone if one just formed
+      if(tr.state >= SETUP_S1_POI_TOUCH && tr.state <= SETUP_S3_MSS &&
+         m_cfg.useM15M5Refinement && !tr.hasRefinedPOI && tr.anchorPOI.tfIdx <= TF_IDX_H1)
+        {
+         SMSNRLevel candRef;
+         if(FindNestedRefinedPOI(tr.anchorPOI, msnr, m5Bar.close, candRef))
+           {
+            tr.hasRefinedPOI   = true;
+            tr.refinedPOI      = candRef;
+            tr.poiOverlapCount = MathMin(2, MathMax(1, tr.poiOverlapCount + 1));
+           }
+        }
+
       //----------------------------------------------------------------
       // STATE S1: POI_TOUCH -> Wait for Liquidity Sweep inside/near POI
       //----------------------------------------------------------------
       if(tr.state == SETUP_S1_POI_TOUCH)
         {
-         // If we didn't have an M15/M5 refined POI yet, check if one just formed/touched
-         if(m_cfg.useM15M5Refinement && !tr.hasRefinedPOI)
-           {
-            SMSNRLevel dummyA, candRef;
-            bool hasRef = false;
-            int ov = 0;
-            if(FindTouchedPOI(tr.direction, m5Bar, msnr, prof, dummyA, hasRef, candRef, ov) && hasRef)
-              {
-               tr.hasRefinedPOI   = true;
-               tr.refinedPOI      = candRef;
-               tr.poiOverlapCount = MathMax(tr.poiOverlapCount, ov);
-              }
-           }
-
          SSweepEvent swEv;
          if(CheckSweepForSetup(tr, mtf, swings, ict, prof, swEv))
            {
@@ -535,7 +584,7 @@ private:
             tr.entryPrice    = tr.refinedPOI.price;
            }
 
-         // 2. Determine Stop Loss (beyond sweep extreme + buffer: 0.2 * ATR(M5) + spread)
+         // 2. Determine Stop Loss (beyond sweep extreme & refined LTF POI wick + buffer: 0.2 * ATR(M5) + spread)
          double atrM5    = mtf.GetATR(TF_IDX_M5);
          double atrH1    = mtf.GetATR(TF_IDX_H1);
          double slBuffer = m_cfg.slBufferAtrMultM5 * atrM5 + currentSpreadPrice;
@@ -543,12 +592,18 @@ private:
          if(tr.direction == BIAS_BULL)
            {
             double baseLow = MathMin(tr.sweep.extremeWickPrice, m5Bar.low);
-            tr.slPrice     = baseLow - slBuffer;
+            if(tr.hasRefinedPOI && tr.refinedPOI.wickExtreme > 0.0 &&
+               MathAbs(tr.entryPrice - tr.refinedPOI.wickExtreme) <= 0.8 * atrH1)
+               baseLow = MathMin(baseLow, tr.refinedPOI.wickExtreme);
+            tr.slPrice = baseLow - slBuffer;
            }
          else
            {
             double baseHigh = MathMax(tr.sweep.extremeWickPrice, m5Bar.high);
-            tr.slPrice      = baseHigh + slBuffer;
+            if(tr.hasRefinedPOI && tr.refinedPOI.wickExtreme > 0.0 &&
+               MathAbs(tr.refinedPOI.wickExtreme - tr.entryPrice) <= 0.8 * atrH1)
+               baseHigh = MathMax(baseHigh, tr.refinedPOI.wickExtreme);
+            tr.slPrice = baseHigh + slBuffer;
            }
 
          double slDist = MathAbs(tr.entryPrice - tr.slPrice);

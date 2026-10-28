@@ -806,6 +806,49 @@ public:
                AddPool(m_pools, m_poolCount, sl);
               }
            }
+
+         // B3B. Quarterly Theory 90-Minute Q1 Accumulation High/Low of Active Session (for Q2/Q3 Judas Sweep)
+         if(qtState.q90 >= QT_Q2 && qtState.sessionStartNY > 0)
+           {
+            datetime q1StartNY  = qtState.sessionStartNY;
+            datetime q1EndNY    = (datetime)((long)q1StartNY + 90 * 60);
+            datetime q1StartSrv = timeEngine.NYToServer(q1StartNY);
+            datetime q1EndSrv   = timeEngine.NYToServer(q1EndNY);
+
+            double q1Hi = -DBL_MAX;
+            double q1Lo =  DBL_MAX;
+            for(int i = 0; i < m15Count; i++)
+              {
+               if(m15Rates[i].time >= q1StartSrv && m15Rates[i].time < q1EndSrv)
+                 {
+                  if(m15Rates[i].high > q1Hi) q1Hi = m15Rates[i].high;
+                  if(m15Rates[i].low  < q1Lo) q1Lo = m15Rates[i].low;
+                 }
+              }
+
+            if(q1Hi >= q1Lo)
+              {
+               string curSesName = QTSessionToString(qtState.session);
+               SLiquidityPool q1h, q1l;
+               q1h.Reset();
+               q1h.type       = LIQ_POOL_SESSION_HIGH;
+               q1h.isBuySide  = true;
+               q1h.tfIdx      = TF_IDX_M15;
+               q1h.price      = q1Hi;
+               q1h.formedTime = q1EndSrv;
+               q1h.id         = StringFormat("Q1_90M_H_%s_%I64d", curSesName, (long)q1EndSrv);
+               AddPool(m_pools, m_poolCount, q1h);
+
+               q1l.Reset();
+               q1l.type       = LIQ_POOL_SESSION_LOW;
+               q1l.isBuySide  = false;
+               q1l.tfIdx      = TF_IDX_M15;
+               q1l.price      = q1Lo;
+               q1l.formedTime = q1EndSrv;
+               q1l.id         = StringFormat("Q1_90M_L_%s_%I64d", curSesName, (long)q1EndSrv);
+               AddPool(m_pools, m_poolCount, q1l);
+              }
+           }
         }
 
       // B4. EQH / EQL Clusters on H4, H1, M15

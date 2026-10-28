@@ -162,7 +162,7 @@ Tujuan: Mendeteksi kolam likuiditas (EQH/EQL, Session/Daily/Weekly High-Low), Li
 - [x] **Detektor Liquidity Sweep (Bar Tertutup)**
   - [x] **Buy-Side Sweep (Bearish):** `high` bar melewati level likuiditas, lalu `close` bar kembali di bawah level tersebut.
   - [x] **Sell-Side Sweep (Bullish):** `low` bar melewati level likuiditas, lalu `close` bar kembali di atas level tersebut.
-  - [x] Valid pada level: `EQH/EQL`, `Session High/Low`, `PDH/PDL`, `PWH/PWL`, serta `Swing H1/H4`.
+  - [x] Valid pada level: `EQH/EQL`, `Session High/Low`, `PDH/PDL`, `PWH/PWL`, `Swing H1/H4`, serta **Rentang Akumulasi `Q1 90-Menit` Sesi Aktif (`Q1_90M_H / Q1_90M_L`)** untuk deteksi *Judas Swing Manipulation* di `Q2/Q3`.
 - [x] **Detektor Market Structure Shift (`MSS`)**
   - [x] Setelah terjadi *Sweep*, memantau apakah ada bar yang `close` body-nya menembus swing berlawanan terakhir (*displacement*).
   - [x] Parameter `UseMSS = true` (default wajib aktif, dapat dimatikan via input).
@@ -193,9 +193,10 @@ Tujuan: Menggabungkan seluruh analisis menjadi Bias Multi-TF, State Machine Setu
     - **Intraday (Default):** Gerbang `D1 & H4` | Skor `W1` | POI `H4, H1, M15, M5` (mendukung *POI Refinement* `M15/M5` di dalam/dekat `H4/H1` maupun POI `M15/M5` mandiri untuk presisi entry) | Trigger `M15/M5 Sweep+MSS, M5 Entry` | RR min `2.0` | Tutup sebelum `18:00 NY` | Waktu: Sesi London & NY AM.
     - **Swing:** Gerbang `W1 & D1` | Skor `H4` | POI `W1, D1, H4` (dengan opsi refinement `H1/M15`) | Trigger `H1 Sweep+MSS, M15 Entry` | RR min `3.0` | Boleh lintas hari (wajib flat Jumat `15:00 NY`) | Waktu: Sesi mana pun, Selasa–Kamis.
   - [x] Mode Gerbang Bias (`BiasGateMode`): `STRICT` (default, semua TF gerbang wajib selaras) atau `MAJORITY`.
+  - [x] **Aturan Storyline Reversal MSNR Murni:** Saat harga masuk/merejeksi **Zona Body-to-Wick Fresh SNR `D1` atau `H4`**, gerbang Storyline mengizinkan setup *reversal* searah pantulan SNR HTF tersebut (dikonfirmasi oleh *Sweep + MSS + FVG* di LTF).
 - [x] **M7: State Machine Setup per Arah Buy/Sell (`Setup.mqh`)**
   - [x] `S0 IDLE`: Menunggu bias bukan NEUTRAL, hari Daye diizinkan (default Selasa–Kamis), dan jendela waktu profil aktif.
-  - [x] `S1 POI_TOUCH`: Harga menyentuh zona POI `FRESH` yang searah bias pada TF POI sesuai profil (`H4/H1/M15/M5` untuk Intraday), termasuk deteksi *nested/refined POI* (`M15/M5` di dalam zona `H4/H1`) untuk mempersempit zona entry.
+  - [x] `S1 POI_TOUCH`: Harga menyentuh **Zona Body-to-Wick (`[zoneLow, zoneHigh]` dari Body Close hingga Ujung Wick Pivot)** pada POI `FRESH` searah bias (`H4/H1/M15/M5` untuk Intraday), dilengkapi **`FindNestedRefinedPOI`** yang memindai level `M15/M5` (*prioritas QM & RBS/SBR*) yang bersarang di dalam zona Body-to-Wick `H4/H1` secara *real-time* (`S1..S3`).
   - [x] `S2 SWEEP`: Terjadi *Liquidity Sweep* di dalam/dekat POI pada TF Trigger (`M15`/`M5` atau `H1` untuk Swing).
   - [x] `S3 MSS`: Body `close` menembus swing berlawanan setelah sweep (*displacement*).
   - [x] `S4 ARMED`: FVG atau POI MSNR `M15/M5` fresh terbentuk pada leg displacement; kalkulasi level Entry presisi (CE FVG / Proximal / Level MSNR `M15/M5` / Market), SL (ekstrem sweep + buffer `0.2 * ATR(M5) + spread`), dan TP (DOL dengan `RR >= RR_min`).

@@ -187,12 +187,16 @@ private:
       return BIAS_NEUTRAL;
      }
 
-   //--- Check if price recently rejected a fresh HTF MSNR level on tfIdx
+   //--- Check if price is currently inside or rejecting a fresh HTF MSNR Body-to-Wick Zone on tfIdx
    static ENUM_BIAS_DIR CheckFreshMSNRRejection(CMSNREngine &msnr,
                                                 const int tfIdx,
-                                                const double currentClose)
+                                                const MqlRates &latestM5Bar)
      {
       int cnt = msnr.GetLevelCount(tfIdx);
+      double curClose = latestM5Bar.close;
+      double curHigh  = latestM5Bar.high;
+      double curLow   = latestM5Bar.low;
+
       for(int i = 0; i < cnt; i++)
         {
          SMSNRLevel lvl;
@@ -200,11 +204,23 @@ private:
             continue;
          if(!lvl.IsFreshForEntry(3))
             continue;
+
+         // 1. Price is currently inside the HTF Body-to-Wick Zone (and not closed beyond distal wick)
+         bool inZone = (curLow <= lvl.zoneHigh && curHigh >= lvl.zoneLow);
+         if(inZone)
+           {
+            if(lvl.direction == BIAS_BULL && curClose >= lvl.zoneLow)
+               return BIAS_BULL;
+            if(lvl.direction == BIAS_BEAR && curClose <= lvl.zoneHigh)
+               return BIAS_BEAR;
+           }
+
+         // 2. Or HTF bar recently touched & rejected the level (shift 1..3)
          if(lvl.touchClosedShift >= 1 && lvl.touchClosedShift <= 3)
            {
-            if(lvl.direction == BIAS_BULL && currentClose >= lvl.price)
+            if(lvl.direction == BIAS_BULL && curClose >= lvl.price)
                return BIAS_BULL;
-            if(lvl.direction == BIAS_BEAR && currentClose <= lvl.price)
+            if(lvl.direction == BIAS_BEAR && curClose <= lvl.price)
                return BIAS_BEAR;
            }
         }
@@ -392,14 +408,14 @@ public:
       m_state.structD1 = ComputeStructureDir(d1Rates, d1Cnt, swings, TF_IDX_D1);
       m_state.structH4 = ComputeStructureDir(h4Rates, h4Cnt, swings, TF_IDX_H4);
 
-      // Incorporate fresh HTF MSNR rejection if present
-      ENUM_BIAS_DIR rejW1 = CheckFreshMSNRRejection(msnr, TF_IDX_W1, curClose);
-      ENUM_BIAS_DIR rejD1 = CheckFreshMSNRRejection(msnr, TF_IDX_D1, curClose);
-      ENUM_BIAS_DIR rejH4 = CheckFreshMSNRRejection(msnr, TF_IDX_H4, curClose);
+      // Incorporate fresh HTF MSNR Zone rejection (MSNR Storyline starts at Fresh HTF SNR!)
+      ENUM_BIAS_DIR rejW1 = CheckFreshMSNRRejection(msnr, TF_IDX_W1, m5Rates[0]);
+      ENUM_BIAS_DIR rejD1 = CheckFreshMSNRRejection(msnr, TF_IDX_D1, m5Rates[0]);
+      ENUM_BIAS_DIR rejH4 = CheckFreshMSNRRejection(msnr, TF_IDX_H4, m5Rates[0]);
 
-      if(m_state.structW1 == BIAS_NEUTRAL) m_state.structW1 = rejW1;
-      if(m_state.structD1 == BIAS_NEUTRAL) m_state.structD1 = rejD1;
-      if(m_state.structH4 == BIAS_NEUTRAL) m_state.structH4 = rejH4;
+      if(rejW1 != BIAS_NEUTRAL) m_state.structW1 = rejW1;
+      if(rejD1 != BIAS_NEUTRAL) m_state.structD1 = rejD1;
+      if(rejH4 != BIAS_NEUTRAL) m_state.structH4 = rejH4;
 
       // 2. True Open Context (True Day Open 00:00 NY & True Week Open Mon 18:00 NY)
       if(qtState.trueOpens.dayOpen.valid && qtState.trueOpens.dayOpen.price > 0.0)
@@ -453,6 +469,13 @@ public:
       // 5. Evaluate Trade Profile Bias Gates for BUY and SELL
       m_state.allowBuy  = profileSpec.CheckBiasGate(BIAS_BULL, m_state.biasW1, m_state.biasD1, m_state.biasH4);
       m_state.allowSell = profileSpec.CheckBiasGate(BIAS_BEAR, m_state.biasW1, m_state.biasD1, m_state.biasH4);
+
+      // MSNR Storyline Reversal Rule: When price taps a Fresh D1 or H4 MSNR Support/Resistance,
+      // allow reversal setups in that HTF POI's direction (LTF Sweep + MSS + FVG will confirm the trigger)
+      if((rejD1 == BIAS_BULL || rejH4 == BIAS_BULL) && rejD1 != BIAS_BEAR)
+         m_state.allowBuy = true;
+      if((rejD1 == BIAS_BEAR || rejH4 == BIAS_BEAR) && rejD1 != BIAS_BULL)
+         m_state.allowSell = true;
 
       if(m_state.allowBuy && !m_state.allowSell)
          m_state.storylineDir = BIAS_BULL;

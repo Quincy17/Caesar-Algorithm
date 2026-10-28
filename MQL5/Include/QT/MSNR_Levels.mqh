@@ -46,10 +46,11 @@ struct SMSNRLevel
    ENUM_POI_STATUS status;           // POI_STATUS_FRESH, TOUCHED, BROKEN, USED
    int             tfIdx;            // Timeframe index (TF_IDX_W1 .. TF_IDX_M5)
    ENUM_BIAS_DIR   direction;        // BIAS_BULL (+1 Support: V, RBS, QM_BULL) or BIAS_BEAR (-1 Resistance: A, SBR, QM_BEAR)
-   double          price;            // Exact body/close level price (single line)
-   double          tolerance;        // Calculated zone half-width = max(spread, 0.05 * ATR14)
-   double          zoneLow;          // price - tolerance
-   double          zoneHigh;         // price + tolerance
+   double          price;            // Exact body/close level price (Proximal MSNR line)
+   double          wickExtreme;      // Distal pivot wick extreme (High for Resistance, Low for Support)
+   double          tolerance;        // Calculated touch tolerance = max(spread, 0.05 * ATR14)
+   double          zoneLow;          // Lower edge of Body-to-Wick zone
+   double          zoneHigh;         // Upper edge of Body-to-Wick zone
 
    datetime        pivotTime;        // Bar time of original pivot (or Left Shoulder for QM)
    datetime        activeFromTime;   // Bar time when level became active (confirmTime for A/V; breakTime for RBS/SBR/QM)
@@ -71,6 +72,7 @@ struct SMSNRLevel
       tfIdx             = TF_IDX_H1;
       direction         = BIAS_NEUTRAL;
       price             = 0.0;
+      wickExtreme       = 0.0;
       tolerance         = 0.0;
       zoneLow           = 0.0;
       zoneHigh          = 0.0;
@@ -295,6 +297,8 @@ public:
 
          bool isResistanceA = (sw.type == SWING_HIGH);
          double lvlPrice    = sw.price;
+         double pivHigh     = MathMax(sw.candleHigh, (pivotArrIdx > 0 ? rates[pivotArrIdx - 1].high : sw.candleHigh));
+         double pivLow      = MathMin(sw.candleLow,  (pivotArrIdx > 0 ? rates[pivotArrIdx - 1].low  : sw.candleLow));
 
          SMSNRLevel baseLvl;
          baseLvl.Reset();
@@ -302,9 +306,20 @@ public:
          baseLvl.type              = (isResistanceA ? POI_CLASSIC_A : POI_CLASSIC_V);
          baseLvl.direction         = (isResistanceA ? BIAS_BEAR : BIAS_BULL);
          baseLvl.price             = lvlPrice;
+         baseLvl.wickExtreme       = (isResistanceA ? MathMax(lvlPrice, pivHigh) : MathMin(lvlPrice, pivLow));
          baseLvl.tolerance         = tol;
-         baseLvl.zoneLow           = lvlPrice - tol;
-         baseLvl.zoneHigh          = lvlPrice + tol;
+         if(isResistanceA)
+           {
+            // MSNR Classic A Zone: from Body Close (proximal) up to Pivot Wick High (distal)
+            baseLvl.zoneLow  = lvlPrice - tol;
+            baseLvl.zoneHigh = MathMax(lvlPrice, baseLvl.wickExtreme) + tol;
+           }
+         else
+           {
+            // MSNR Classic V Zone: from Pivot Wick Low (distal) up to Body Close (proximal)
+            baseLvl.zoneLow  = MathMin(lvlPrice, baseLvl.wickExtreme) - tol;
+            baseLvl.zoneHigh = lvlPrice + tol;
+           }
          baseLvl.pivotTime         = sw.pivotTime;
          baseLvl.activeFromTime    = sw.confirmTime;
          baseLvl.pivotClosedShift  = sw.pivotClosedShift;
@@ -373,9 +388,20 @@ public:
             flipLvl.type              = (isResistanceA ? POI_RBS : POI_SBR);
             flipLvl.direction         = (isResistanceA ? BIAS_BULL : BIAS_BEAR);
             flipLvl.price             = lvlPrice;
+            flipLvl.wickExtreme       = (isResistanceA ? MathMin(lvlPrice, pivLow) : MathMax(lvlPrice, pivHigh));
             flipLvl.tolerance         = tol;
-            flipLvl.zoneLow           = lvlPrice - tol;
-            flipLvl.zoneHigh          = lvlPrice + tol;
+            if(isResistanceA)
+              {
+               // RBS (Broken A becomes Support): spans from slightly below broken A body up to A pivot wick
+               flipLvl.zoneLow  = lvlPrice - MathMax(tol, 0.15 * atrValue);
+               flipLvl.zoneHigh = MathMax(lvlPrice, pivHigh) + tol;
+              }
+            else
+              {
+               // SBR (Broken V becomes Resistance): spans from V pivot wick up to slightly above broken V body
+               flipLvl.zoneLow  = MathMin(lvlPrice, pivLow) - tol;
+               flipLvl.zoneHigh = lvlPrice + MathMax(tol, 0.15 * atrValue);
+              }
             flipLvl.pivotTime         = sw.pivotTime;
             flipLvl.activeFromTime    = rates[breakArrIdx].time;
             flipLvl.pivotClosedShift  = sw.pivotClosedShift;
@@ -480,8 +506,9 @@ public:
                   qm.type              = POI_QM_BULL;
                   qm.direction         = BIAS_BULL;
                   qm.price             = s1_LS.price; // QM level = Left Shoulder body price!
+                  qm.wickExtreme       = MathMin(s1_LS.price, s1_LS.candleLow);
                   qm.tolerance         = tol;
-                  qm.zoneLow           = qm.price - tol;
+                  qm.zoneLow           = MathMin(qm.price, qm.wickExtreme) - tol;
                   qm.zoneHigh          = qm.price + tol;
                   qm.pivotTime         = s1_LS.pivotTime;
                   qm.activeFromTime    = rates[breakArrIdx].time;
@@ -497,7 +524,7 @@ public:
                   bool qmBroken = false;
                   for(int j = breakArrIdx - 1; j >= 0; j--)
                     {
-                     if(rates[j].close < s3_Head.price || rates[j].close < qm.zoneLow)
+                     if(rates[j].close < MathMin(s3_Head.price, s3_Head.candleLow) || rates[j].close < qm.zoneLow)
                        {
                         qmBroken = true;
                         break;
@@ -544,9 +571,10 @@ public:
                   qm.type              = POI_QM_BEAR;
                   qm.direction         = BIAS_BEAR;
                   qm.price             = s1_LS.price; // QM level = Left Shoulder body price!
+                  qm.wickExtreme       = MathMax(s1_LS.price, s1_LS.candleHigh);
                   qm.tolerance         = tol;
                   qm.zoneLow           = qm.price - tol;
-                  qm.zoneHigh          = qm.price + tol;
+                  qm.zoneHigh          = MathMax(qm.price, qm.wickExtreme) + tol;
                   qm.pivotTime         = s1_LS.pivotTime;
                   qm.activeFromTime    = rates[breakArrIdx].time;
                   qm.pivotClosedShift  = s1_LS.pivotClosedShift;
@@ -561,7 +589,7 @@ public:
                   bool qmBroken = false;
                   for(int j = breakArrIdx - 1; j >= 0; j--)
                     {
-                     if(rates[j].close > s3_Head.price || rates[j].close > qm.zoneHigh)
+                     if(rates[j].close > MathMax(s3_Head.price, s3_Head.candleHigh) || rates[j].close > qm.zoneHigh)
                        {
                         qmBroken = true;
                         break;
