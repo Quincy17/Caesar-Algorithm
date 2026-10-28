@@ -119,7 +119,7 @@ Tujuan: Mendeteksi level support/resistance berbasis body (line chart) beserta s
   - [x] **Status `BROKEN` $\rightarrow$ Flip menjadi `RBS / SBR`:**
     - Jika `close` (body) menembus Resistance A ke atas $\rightarrow$ lahir **RBS (Resistance Become Support)** di harga yang sama dengan status **`FRESH`**.
     - Jika `close` (body) menembus Support V ke bawah $\rightarrow$ lahir **SBR (Support Become Resistance)** di harga yang sama dengan status **`FRESH`**.
-  - [x] **Siklus Hidup `RBS / SBR`:** Berstatus `FRESH` sejak bar penembusan hingga ada wick pertama pada bar berikutnya yang menyentuhnya. Setelah tersentuh pertama kali (atau setelah trade terjadi), status berubah menjadi **`USED`**.
+  - [x] **Siklus Hidup `RBS / SBR`:** Berstatus `FRESH` sejak bar penembusan pada zona garis body `lvlPrice ± tolerance` (tanpa melebar ke bekas ekor pra-breakout) hingga ada wick pertama pada bar berikutnya yang menyentuhnya. Setelah tersentuh pertama kali (atau setelah trade terjadi), status berubah menjadi **`USED`**.
 - [x] **Manajemen Memori & Beban Level**
   - [x] Simpan maksimal `20` level aktif terdekat dengan harga saat ini per TF.
   - [x] Expired otomatis untuk level yang lebih tua dari `MaxLevelAgeBars` (parameter per TF).
@@ -269,7 +269,13 @@ Tujuan: Mengaktifkan eksekusi order (`CTrade`), manajemen risiko ketat, filter b
 Tujuan: Menguji performa dan validitas aturan secara statistik di Strategy Tester MT5 dan mengkalibrasi skor tanpa *overfitting*.
 
 - [ ] **Eksekusi Backtest Multi-Tahun (`XAUUSD`) (Di Strategy Tester MT5)**
-  - [ ] Pengujian di Strategy Tester dengan mode *Every tick based on real ticks* selama minimal 2–3 tahun (mencakup periode pergantian DST Maret & November) dengan spread realistis dan CSV berita historis aktif.
+  - [x] **Backtest Iterasi 1 (`report-1`, `2026.01.01 – 2026.10.27`, Real Ticks + Forward 1/2):** Lulus uji integrasi penuh 64 trade (In-Sample profit `+$80.77` / peak `+$411.48`), dan selesai dilakukan audit telemetri `QT_Forward_Journal.csv`.
+  - [x] **Kalibrasi & Tuning Pasca-Report-1 (`v1.11`):**
+    - Patenkan ukuran lot berbasis kelipatan ekuitas (`0.05 lot` per `$5,000 USD` Equity: `$5k -> 0.05`, `$10k -> 0.10`, `$25k -> 0.25`) di `Risk.mqh`.
+    - Wajibkan **Partial Close 50% (`PARTIAL_TP1`) + Break-Even secara serentak tepat saat running `100 pips` (`$10.00` di XAUUSD)** di `Setup.mqh` & `Exec.mqh`.
+    - Kalibrasi jarak SL manual XAUUSD (`45–75 pips`, target default `60 pips` / `$6.00`) dan Full TP Runner (`300 pips` / `$30.00` atau HTF DOL) untuk mengeliminasi *micro-SL* (`< 15 pips`) maupun SL terlalu lebar.
+    - Filter *standalone* POI `M15`/`M5` agar hanya menerima zona *Flip/QM* (`RBS`, `SBR`, `QM_Bull`, `QM_Bear`) jika tanpa Anchor HTF (`H4`/`H1`), serta auto-cancel *orphan pending limit order* saat jendela waktu sesi berakhir atau setup batal.
+  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-kalibrasi `v1.11`.
   - [ ] Pemisahan periode data menjadi **In-Sample (IS)** dan **Out-of-Sample (OOS)**.
 - [x] **Script Analisis Statistik & Validasi Asumsi QT (`AnalyzeBacktestCSV.mq5`)**
   - [x] Evaluasi metrik utama: Jumlah trade (target $\ge 100$), *Expectancy* (dalam R), *Profit Factor*, *Max Drawdown*, *Win Rate*, dan rata-rata RR.

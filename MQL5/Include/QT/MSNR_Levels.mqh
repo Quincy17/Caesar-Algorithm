@@ -388,20 +388,11 @@ public:
             flipLvl.type              = (isResistanceA ? POI_RBS : POI_SBR);
             flipLvl.direction         = (isResistanceA ? BIAS_BULL : BIAS_BEAR);
             flipLvl.price             = lvlPrice;
-            flipLvl.wickExtreme       = (isResistanceA ? MathMin(lvlPrice, pivLow) : MathMax(lvlPrice, pivHigh));
+            flipLvl.wickExtreme       = lvlPrice;
             flipLvl.tolerance         = tol;
-            if(isResistanceA)
-              {
-               // RBS (Broken A becomes Support): spans from slightly below broken A body up to A pivot wick
-               flipLvl.zoneLow  = lvlPrice - MathMax(tol, 0.15 * atrValue);
-               flipLvl.zoneHigh = MathMax(lvlPrice, pivHigh) + tol;
-              }
-            else
-              {
-               // SBR (Broken V becomes Resistance): spans from V pivot wick up to slightly above broken V body
-               flipLvl.zoneLow  = MathMin(lvlPrice, pivLow) - tol;
-               flipLvl.zoneHigh = lvlPrice + MathMax(tol, 0.15 * atrValue);
-              }
+            // RBS / SBR (Flipped A/V): touch zone is strictly around the broken Body Close line [lvlPrice - tol, lvlPrice + tol]
+            flipLvl.zoneLow           = lvlPrice - tol;
+            flipLvl.zoneHigh          = lvlPrice + tol;
             flipLvl.pivotTime         = sw.pivotTime;
             flipLvl.activeFromTime    = rates[breakArrIdx].time;
             flipLvl.pivotClosedShift  = sw.pivotClosedShift;

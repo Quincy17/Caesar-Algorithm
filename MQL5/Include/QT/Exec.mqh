@@ -285,6 +285,7 @@ struct SExecConfig
    double breakEvenBufferPoints;
    bool   usePartialCloseTP1;
    double partialCloseRatio;      // Default 0.50 (50%)
+   double partialTp1Pips;         // Default 100.0 pips ($10.00 on XAUUSD) for Partial TP1 + Break-Even
    bool   useTimeStop;            // Enforce profile duration limit
    bool   closeOrBeBeforeNews;    // Optional: move to BE before news window (default false)
 
@@ -297,6 +298,7 @@ struct SExecConfig
       breakEvenBufferPoints = 5.0;
       usePartialCloseTP1    = true;
       partialCloseRatio     = 0.50;
+      partialTp1Pips        = 100.0;
       useTimeStop           = true;
       closeOrBeBeforeNews   = false;
      }
@@ -429,6 +431,8 @@ private:
    CQTTradeExecutor  m_trade;
    SManagedTrade     m_managed[10];
    int               m_managedCount;
+   SSetupTracker     m_lastArmedBuy;
+   SSetupTracker     m_lastArmedSell;
 
    //--- Detect supported filling mode for symbol
    static ENUM_ORDER_TYPE_FILLING DetectFillingMode(const string symbol)
@@ -529,7 +533,10 @@ private:
       m_managed[slot].entryPrice         = fillE;
       m_managed[slot].initialSL          = tr.slPrice;
       m_managed[slot].currentSL          = tr.slPrice;
-      m_managed[slot].tp1Price           = tr.tp1Price;
+
+      // Anchor TP1 strictly at +100 pips (m_cfg.partialTp1Pips) from actual fill price
+      double tp1DistPrice                = QTPipsToPrice(m_symbol, (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+      m_managed[slot].tp1Price           = (tr.direction == BIAS_BULL ? fillE + tp1DistPrice : fillE - tp1DistPrice);
       m_managed[slot].finalTP            = tr.tpPrice;
       m_managed[slot].plannedRR          = tr.rrRatio;
       m_managed[slot].initialRiskUsd     = initialRiskMoney;
@@ -732,6 +739,8 @@ public:
       m_symbol       = QT_TARGET_SYMBOL;
       m_managedCount = 0;
       m_cfg.SetDefaults();
+      m_lastArmedBuy.Reset(BIAS_BULL);
+      m_lastArmedSell.Reset(BIAS_BEAR);
       for(int i = 0; i < 10; i++)
          m_managed[i].Reset();
      }
@@ -747,6 +756,8 @@ public:
       m_trade.SetAsyncMode(false);
 
       m_managedCount = 0;
+      m_lastArmedBuy.Reset(BIAS_BULL);
+      m_lastArmedSell.Reset(BIAS_BEAR);
       for(int i = 0; i < 10; i++)
          m_managed[i].Reset();
      }
@@ -1084,6 +1095,10 @@ public:
         }
 
       int digits = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
+      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      int stopsPts = (int)MathMax(SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL),
+                                  SymbolInfoInteger(m_symbol, SYMBOL_TRADE_FREEZE_LEVEL));
+      double minStopDist = (stopsPts > 0 ? stopsPts * point : point * 2.0);
       double ask = SymbolInfoDouble(m_symbol, SYMBOL_ASK);
       double bid = SymbolInfoDouble(m_symbol, SYMBOL_BID);
 
@@ -1091,13 +1106,31 @@ public:
       double slNorm    = NormalizeDouble(tr.slPrice,    digits);
       double tpNorm    = NormalizeDouble(tr.tpPrice,    digits);
 
+      // Guard against invalid stops or price already past SL
+      if(tr.direction == BIAS_BULL)
+        {
+         if(slNorm >= entryNorm - minStopDist || bid <= slNorm + minStopDist || ask >= tpNorm - minStopDist)
+           {
+            setupEngine.NotifySetupCompleted(tr.direction, "INVALID_OR_CROSSED_STOPS");
+            return false;
+           }
+        }
+      else
+        {
+         if(slNorm <= entryNorm + minStopDist || ask >= slNorm - minStopDist || bid <= tpNorm + minStopDist)
+           {
+            setupEngine.NotifySetupCompleted(tr.direction, "INVALID_OR_CROSSED_STOPS");
+            return false;
+           }
+        }
+
       bool useMarket = tr.isMarketOrder;
-      // If limit price was already crossed by current market price (and still valid above SL), execute Market
+      // If limit price was already crossed or within stopsLevel of current market price, execute Market (if SL is still safe)
       if(!useMarket)
         {
-         if(tr.direction == BIAS_BULL && ask <= entryNorm && ask > slNorm)
+         if(tr.direction == BIAS_BULL && entryNorm >= ask - minStopDist)
             useMarket = true;
-         if(tr.direction == BIAS_BEAR && bid >= entryNorm && bid < slNorm)
+         if(tr.direction == BIAS_BEAR && entryNorm <= bid + minStopDist)
             useMarket = true;
         }
 
@@ -1153,6 +1186,10 @@ public:
         }
       else
         {
+         if(tr.direction == BIAS_BULL)
+            m_lastArmedBuy = tr;
+         else
+            m_lastArmedSell = tr;
          setupEngine.NotifyOrderPlaced(tr.direction, ticket);
          logger.LogTradeEvent("ORDER_LIMIT_PLACED", tr.setupId, ticket, tr.direction, lots,
                               entryNorm, slNorm, tpNorm, 0.0, 0.0, 0.0,
@@ -1166,8 +1203,7 @@ public:
    //| Manage Open Positions, Track MFE/MAE & Reconcile Closed Trades   |
    //| - Updates MFE & MAE on every tick                                |
    //| - Reconciles closed positions into QT_Forward_Journal.csv        |
-   //| - Break-Even at +1R                                              |
-   //| - 50% Partial Close at TP1 (internal liquidity)                  |
+   //| - Simultaneous 50% Partial Close + Break-Even at 100 Pips (TP1)  |
    //| - Time Stop (Scalping: end of 90m block; Intraday: 17:55 NY)     |
    //+------------------------------------------------------------------+
    void              ManageActiveTrades(CSetupEngine &setupEngine,
@@ -1207,14 +1243,21 @@ public:
             SSetupTracker refTr = (dir == BIAS_BULL ? buyTr : sellTr);
             if(StringLen(refTr.setupId) == 0)
               {
-               refTr.Reset(dir);
-               refTr.setupId    = comm;
-               refTr.entryPrice = openP;
-               refTr.slPrice    = slP;
-               refTr.tpPrice    = tpP;
-               refTr.tp1Price   = (dir == BIAS_BULL ? openP + MathAbs(openP - slP) : openP - MathAbs(openP - slP));
-               double slD       = MathAbs(openP - slP);
-               refTr.rrRatio    = (slD > 1e-5 ? MathAbs(tpP - openP) / slD : 0.0);
+               SSetupTracker savedTr = (dir == BIAS_BULL ? m_lastArmedBuy : m_lastArmedSell);
+               if(StringLen(savedTr.setupId) > 0)
+                  refTr = savedTr;
+               else
+                 {
+                  refTr.Reset(dir);
+                  refTr.setupId    = comm;
+                  refTr.entryPrice = openP;
+                  refTr.slPrice    = slP;
+                  refTr.tpPrice    = tpP;
+                  double tp1D      = QTPipsToPrice(m_symbol, (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+                  refTr.tp1Price   = (dir == BIAS_BULL ? openP + tp1D : openP - tp1D);
+                  double slD       = MathAbs(openP - slP);
+                  refTr.rrRatio    = (slD > 1e-5 ? MathAbs(tpP - openP) / slD : 0.0);
+                 }
               }
 
             double riskUsd = riskMgr.CalcRiskMoneyForVolume(dir, lots, openP, slP);
@@ -1304,48 +1347,59 @@ public:
               }
            }
 
-         // B) Break-Even at +1R
-         if(m_cfg.useBreakEvenAt1R && !m_managed[m].beApplied && curR >= 1.0)
-           {
-            double beBuffer = m_cfg.breakEvenBufferPoints * point;
-            double newSL    = (dir == BIAS_BULL ? NormalizeDouble(m_managed[m].entryPrice + beBuffer, digits)
-                                                : NormalizeDouble(m_managed[m].entryPrice - beBuffer, digits));
+         // B & C) Mandatory Partial Close (50%) + Simultaneous Break-Even when Running 100 Pips (TP1)!
+         double tp1TargetDist = QTPipsToPrice(m_symbol, (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+         bool tp1Reached = (profitDist >= tp1TargetDist - 1e-5) ||
+                           (m_managed[m].tp1Price > 0.0 &&
+                            (dir == BIAS_BULL ? (curPrice >= m_managed[m].tp1Price)
+                                              : (curPrice <= m_managed[m].tp1Price)));
 
-            bool slImproved = (dir == BIAS_BULL ? (newSL > curSL) : (curSL == 0.0 || newSL < curSL));
-            if(slImproved && m_trade.PositionModify(ticket, newSL, curTP))
-              {
-               m_managed[m].beApplied = true;
-               m_managed[m].currentSL = newSL;
-               logger.LogTradeEvent("BREAK_EVEN_1R", m_managed[m].setupId, ticket, dir, curLots,
-                                    m_managed[m].entryPrice, newSL, curTP, curPrice,
-                                    curProfit, curR, m_managed[m].confluenceScore,
-                                    m_managed[m].poiSummary, "SL_MOVED_TO_BE_AT_1R", qtState, prof.profile);
-              }
-           }
-
-         // C) Partial Close (50%) at TP1 Internal Liquidity Roadblock
-         if(m_cfg.usePartialCloseTP1 && !m_managed[m].partialDone && m_managed[m].tp1Price > 0.0)
+         if(tp1Reached)
            {
-            bool tp1Reached = (dir == BIAS_BULL ? (curPrice >= m_managed[m].tp1Price)
-                                                : (curPrice <= m_managed[m].tp1Price));
-            if(tp1Reached && curLots >= minLot * 2.0)
+            // 1. Execute Partial Close (50%) at 100 Pips first
+            if(m_cfg.usePartialCloseTP1 && !m_managed[m].partialDone)
               {
-               double closeVol = CRiskManager::NormalizeVolume(curLots * m_cfg.partialCloseRatio,
-                                                               minLot, curLots - minLot, stepLot);
-               if(closeVol >= minLot && (curLots - closeVol) >= minLot)
+               if(curLots >= minLot * 2.0)
                  {
-                  if(m_trade.PositionClosePartial(ticket, closeVol, (ulong)MathMax(0, m_cfg.slippagePoints)))
+                  double closeVol = CRiskManager::NormalizeVolume(curLots * m_cfg.partialCloseRatio,
+                                                                  minLot, curLots - minLot, stepLot);
+                  if(closeVol >= minLot && (curLots - closeVol) >= minLot)
                     {
-                     m_managed[m].partialDone = true;
-                     logger.LogTradeEvent("PARTIAL_TP1", m_managed[m].setupId, ticket, dir, closeVol,
-                                          m_managed[m].entryPrice, curSL, curTP, curPrice,
-                                          curProfit * m_cfg.partialCloseRatio, curR,
-                                          m_managed[m].confluenceScore, m_managed[m].poiSummary,
-                                          "PARTIAL_50_AT_TP1", qtState, prof.profile);
+                     if(m_trade.PositionClosePartial(ticket, closeVol, (ulong)MathMax(0, m_cfg.slippagePoints)))
+                       {
+                        m_managed[m].partialDone = true;
+                        curLots -= closeVol;
+                        logger.LogTradeEvent("PARTIAL_TP1", m_managed[m].setupId, ticket, dir, closeVol,
+                                             m_managed[m].entryPrice, curSL, curTP, curPrice,
+                                             curProfit * m_cfg.partialCloseRatio, curR,
+                                             m_managed[m].confluenceScore, m_managed[m].poiSummary,
+                                             "PARTIAL_50_AT_100PIPS", qtState, prof.profile);
+                       }
                     }
+                  else
+                     m_managed[m].partialDone = true; // Cannot split minimum lot
                  }
                else
-                  m_managed[m].partialDone = true; // Cannot split minimum lot
+                  m_managed[m].partialDone = true;
+              }
+
+            // 2. Move SL to Break-Even simultaneously after reaching 100 Pips (TP1)
+            if(m_cfg.useBreakEvenAt1R && !m_managed[m].beApplied)
+              {
+               double beBuffer = m_cfg.breakEvenBufferPoints * point;
+               double newSL    = (dir == BIAS_BULL ? NormalizeDouble(m_managed[m].entryPrice + beBuffer, digits)
+                                                   : NormalizeDouble(m_managed[m].entryPrice - beBuffer, digits));
+
+               bool slImproved = (dir == BIAS_BULL ? (newSL > curSL) : (curSL == 0.0 || newSL < curSL));
+               if(slImproved && m_trade.PositionModify(ticket, newSL, curTP))
+                 {
+                  m_managed[m].beApplied = true;
+                  m_managed[m].currentSL = newSL;
+                  logger.LogTradeEvent("BREAK_EVEN_1R", m_managed[m].setupId, ticket, dir, curLots,
+                                       m_managed[m].entryPrice, newSL, curTP, curPrice,
+                                       curProfit, curR, m_managed[m].confluenceScore,
+                                       m_managed[m].poiSummary, "SL_MOVED_TO_BE_AT_100PIPS", qtState, prof.profile);
+                 }
               }
            }
         }

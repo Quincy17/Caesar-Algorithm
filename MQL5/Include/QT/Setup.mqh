@@ -26,6 +26,11 @@ struct SSetupConfig
    double          slBufferAtrMultM5;  // SL buffer = mult * ATR(M5) + spread (default 0.20)
    double          maxSlAtrMultH1;     // Max SL width = mult * ATR(H1) (default 2.50)
    bool            useM15M5Refinement; // Enable M15/M5 MSNR POI refinement for sharper entry
+   double          targetSlPips;       // Default manual SL distance = 60.0 pips ($6.00 on XAUUSD)
+   double          minSlPips;          // Minimum SL distance = 45.0 pips ($4.50 on XAUUSD)
+   double          maxSlPips;          // Maximum structural SL distance = 75.0 pips ($7.50 on XAUUSD)
+   double          partialTp1Pips;     // Mandatory Partial TP1 + BE distance = 100.0 pips ($10.00 on XAUUSD)
+   double          runnerTpPips;       // Default Full TP Runner distance = 300.0 pips ($30.00 on XAUUSD)
 
    void SetDefaults()
      {
@@ -36,6 +41,11 @@ struct SSetupConfig
       slBufferAtrMultM5  = 0.20;
       maxSlAtrMultH1     = 2.50;
       useM15M5Refinement = true;
+      targetSlPips       = 60.0;
+      minSlPips          = 45.0;
+      maxSlPips          = 75.0;
+      partialTp1Pips     = 100.0;
+      runnerTpPips       = 300.0;
      }
   };
 
@@ -259,6 +269,11 @@ private:
             if(!msnr.GetLevel(tf, i, lvl))
                continue;
             if(lvl.direction != dir || !lvl.IsFreshForEntry(3))
+               continue;
+
+            // For standalone LTF (M15/M5) Anchor POI without HTF zone, require confirmed Flip (RBS/SBR) or Quasimodo (QM)
+            if(tf >= TF_IDX_M15 &&
+               (lvl.type == POI_CLASSIC_A || lvl.type == POI_CLASSIC_V))
                continue;
 
             // Check if M5 closed bar touched or entered the MSNR Body-to-Wick Zone [zoneLow, zoneHigh]
@@ -584,10 +599,14 @@ private:
             tr.entryPrice    = tr.refinedPOI.price;
            }
 
-         // 2. Determine Stop Loss (beyond sweep extreme & refined LTF POI wick + buffer: 0.2 * ATR(M5) + spread)
+         // 2. Determine Stop Loss (Calibrated to User's Manual XAUUSD Style: 45-75 pips, target 60 pips = $6.00)
          double atrM5    = mtf.GetATR(TF_IDX_M5);
          double atrH1    = mtf.GetATR(TF_IDX_H1);
          double slBuffer = m_cfg.slBufferAtrMultM5 * atrM5 + currentSpreadPrice;
+
+         double minSlDist    = QTPipsToPrice(_Symbol, (m_cfg.minSlPips    > 0.0 ? m_cfg.minSlPips    : 45.0));
+         double targetSlDist = QTPipsToPrice(_Symbol, (m_cfg.targetSlPips > 0.0 ? m_cfg.targetSlPips : 60.0));
+         double maxSlDist    = QTPipsToPrice(_Symbol, (m_cfg.maxSlPips    > 0.0 ? m_cfg.maxSlPips    : 75.0));
 
          if(tr.direction == BIAS_BULL)
            {
@@ -596,6 +615,22 @@ private:
                MathAbs(tr.entryPrice - tr.refinedPOI.wickExtreme) <= 0.8 * atrH1)
                baseLow = MathMin(baseLow, tr.refinedPOI.wickExtreme);
             tr.slPrice = baseLow - slBuffer;
+
+            double rawSlDist = tr.entryPrice - tr.slPrice;
+            if(rawSlDist < minSlDist)
+               tr.slPrice = tr.entryPrice - targetSlDist; // Pad micro/invalid SL to 60 pips ($6.00)
+            else if(rawSlDist > maxSlDist && rawSlDist <= maxSlDist * 1.65)
+               tr.slPrice = tr.entryPrice - maxSlDist;    // Cap moderately wide structural SL to 75 pips ($7.50)
+
+            // Ensure current M5 close has not already violated the calibrated SL
+            if(m5Bar.close <= tr.slPrice)
+              {
+               tr.statusNote       = "REJECT_PRICE_BELOW_SL";
+               m_lastEvaluatedSetup = tr;
+               m_hasNewLogEvent    = true;
+               tr.Reset(tr.direction);
+               return;
+              }
            }
          else
            {
@@ -604,9 +639,26 @@ private:
                MathAbs(tr.refinedPOI.wickExtreme - tr.entryPrice) <= 0.8 * atrH1)
                baseHigh = MathMax(baseHigh, tr.refinedPOI.wickExtreme);
             tr.slPrice = baseHigh + slBuffer;
+
+            double rawSlDist = tr.slPrice - tr.entryPrice;
+            if(rawSlDist < minSlDist)
+               tr.slPrice = tr.entryPrice + targetSlDist; // Pad micro/invalid SL to 60 pips ($6.00)
+            else if(rawSlDist > maxSlDist && rawSlDist <= maxSlDist * 1.65)
+               tr.slPrice = tr.entryPrice + maxSlDist;    // Cap moderately wide structural SL to 75 pips ($7.50)
+
+            // Ensure current M5 close has not already violated the calibrated SL
+            if(m5Bar.close >= tr.slPrice)
+              {
+               tr.statusNote       = "REJECT_PRICE_ABOVE_SL";
+               m_lastEvaluatedSetup = tr;
+               m_hasNewLogEvent    = true;
+               tr.Reset(tr.direction);
+               return;
+              }
            }
 
-         double slDist = MathAbs(tr.entryPrice - tr.slPrice);
+         double slDist = (tr.direction == BIAS_BULL ? (tr.entryPrice - tr.slPrice)
+                                                    : (tr.slPrice - tr.entryPrice));
          if(slDist <= 1e-5)
            {
             tr.statusNote       = "REJECT_INVALID_SL_DISTANCE";
@@ -616,36 +668,47 @@ private:
             return;
            }
 
-         // Check max SL width against H1 ATR multiple
-         if(atrH1 > 0.0 && slDist > m_cfg.maxSlAtrMultH1 * atrH1)
+         // Check max SL width against calibrated maxSlDist * 1.65 & H1 ATR multiple
+         if(slDist > maxSlDist * 1.65 || (atrH1 > 0.0 && slDist > m_cfg.maxSlAtrMultH1 * atrH1))
            {
-            tr.statusNote       = StringFormat("REJECT_SL_TOO_WIDE (%.2f > %.2f*ATR_H1)", slDist, m_cfg.maxSlAtrMultH1);
+            tr.statusNote       = StringFormat("REJECT_SL_TOO_WIDE (%.2f pips)", QTPriceToPips(_Symbol, slDist));
             m_lastEvaluatedSetup = tr;
             m_hasNewLogEvent    = true;
             tr.Reset(tr.direction);
             return;
            }
 
-         // 3. Determine Take Profit (DOL) & Internal TP1 Roadblock
+         // 3. Determine Mandatory Partial TP1 (100 pips = $10.00) & Full Runner TP (300 pips = $30.00 or HTF DOL)
          SDOLTarget dolTarget = (tr.direction == BIAS_BULL ? biasState.bullDOL : biasState.bearDOL);
-         SDOLTarget tp1Target = (tr.direction == BIAS_BULL ? biasState.bullInternalTP1 : biasState.bearInternalTP1);
          double minRR         = (m_cfg.customMinRR > 0.0 ? m_cfg.customMinRR : prof.minRR);
 
+         double tp1Dist       = QTPipsToPrice(_Symbol, (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+         double runnerDist    = QTPipsToPrice(_Symbol, (m_cfg.runnerTpPips   > 0.0 ? m_cfg.runnerTpPips   : 300.0));
+         double minFullTpDist = MathMax(slDist * minRR, tp1Dist * 1.80);
+
+         // Mandatory Partial TP1 + Break-Even at 100 pips ($10.00)
+         tr.tp1Price = (tr.direction == BIAS_BULL ? tr.entryPrice + tp1Dist : tr.entryPrice - tp1Dist);
+
+         bool usedDol = false;
          if(dolTarget.valid)
            {
-            tr.tpPrice  = dolTarget.price;
-            tr.dolLabel = dolTarget.label;
-           }
-         else
-           {
-            // Fallback: project minimum RR target if no external pool was in cache range
-            tr.tpPrice  = (tr.direction == BIAS_BULL ? tr.entryPrice + slDist * minRR
-                                                     : tr.entryPrice - slDist * minRR);
-            tr.dolLabel = "RR_PROJECTED";
+            double dolDist = (tr.direction == BIAS_BULL ? (dolTarget.price - tr.entryPrice)
+                                                        : (tr.entryPrice - dolTarget.price));
+            if(dolDist >= minFullTpDist && dolDist <= runnerDist * 1.25)
+              {
+               tr.tpPrice  = dolTarget.price;
+               tr.dolLabel = dolTarget.label;
+               usedDol     = true;
+              }
            }
 
-         tr.tp1Price = (tp1Target.valid ? tp1Target.price :
-                        (tr.direction == BIAS_BULL ? tr.entryPrice + slDist : tr.entryPrice - slDist));
+         if(!usedDol)
+           {
+            double projDist = MathMax(runnerDist, minFullTpDist);
+            tr.tpPrice  = (tr.direction == BIAS_BULL ? tr.entryPrice + projDist
+                                                     : tr.entryPrice - projDist);
+            tr.dolLabel = "RUNNER_300P";
+           }
 
          double reward = (tr.direction == BIAS_BULL ? (tr.tpPrice - tr.entryPrice)
                                                     : (tr.entryPrice - tr.tpPrice));

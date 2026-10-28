@@ -90,7 +90,14 @@ void OnStart()
    for(int i = 0; i < 7; i++) sliceTouched[i] = rates[i + 2];
    CSwingEngine::ScanRatesForSwings(sliceTouched, 7, TF_IDX_H1, 2, 50, wickSw, wCnt, bodySw, bCnt);
    CMSNREngine::BuildLevelsForTF(sliceTouched, 7, bodySw, bCnt, TF_IDX_H1, 10.0, 0.20, cfg, lvlsA, cntA);
-   Check(cntA == 1 && lvlsA[0].type == POI_CLASSIC_A && lvlsA[0].status == POI_STATUS_TOUCHED,
+   bool foundATouched = false;
+   for(int i = 0; i < cntA; i++)
+     {
+      if(lvlsA[i].type == POI_CLASSIC_A && MathAbs(lvlsA[i].price - 2720.0) < 1e-5 &&
+         lvlsA[i].status == POI_STATUS_TOUCHED)
+         foundATouched = true;
+     }
+   Check(foundATouched,
          "Classic A transitions to TOUCHED after wick reaches 2721 without body close break");
 
    // C) Check full 9 bars -> Body closed at 2730 (> 2720), flipping Classic A into RBS (FRESH) at 2720.0

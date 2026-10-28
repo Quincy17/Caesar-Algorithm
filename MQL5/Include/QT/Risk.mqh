@@ -21,7 +21,10 @@
 
 struct SRiskConfig
   {
-   double riskPercentPerTrade; // Default 0.5% of account balance
+   bool   useEquityStepLot;    // Default true: Fixed 0.05 lot per $5,000 USD equity tier
+   double equityStepUsd;       // Default 5000.0 USD per step
+   double lotPerEquityStep;    // Default 0.05 lot per step (e.g. $5k->0.05, $10k->0.10, $25k->0.25)
+   double riskPercentPerTrade; // Fallback % risk if useEquityStepLot=false (default 0.5%)
    double maxDailyLossPercent; // Default 2.0% of start-of-day balance
    double maxWeeklyLossPercent;// Default 5.0% of start-of-week balance
    int    maxTradesPerDayeDay; // Default 2 trades per Daye day
@@ -30,6 +33,9 @@ struct SRiskConfig
 
    void SetDefaults()
      {
+      useEquityStepLot     = true;
+      equityStepUsd        = 5000.0;
+      lotPerEquityStep     = 0.05;
       riskPercentPerTrade  = 0.50;
       maxDailyLossPercent  = 2.00;
       maxWeeklyLossPercent = 5.00;
@@ -186,6 +192,24 @@ public:
      }
 
    //+------------------------------------------------------------------+
+   //| Patented Equity-Step Lot Calculator                              |
+   //| 0.05 lot per $5,000 USD tier ($5k->0.05, $10k->0.10, $25k->0.25) |
+   //+------------------------------------------------------------------+
+   static double     CalcEquityStepLot(const double equity,
+                                       const double stepUsd,
+                                       const double lotPerStep,
+                                       const double minLot,
+                                       const double maxLot,
+                                       const double lotStep)
+     {
+      if(equity <= 0.0 || stepUsd <= 0.0 || lotPerStep <= 0.0)
+         return 0.0;
+      double tiers  = MathMax(1.0, MathRound(equity / stepUsd));
+      double rawLot = tiers * lotPerStep;
+      return NormalizeVolume(rawLot, minLot, maxLot, lotStep);
+     }
+
+   //+------------------------------------------------------------------+
    //| Calculate Position Size (Lots) for Given Entry & Stop Loss       |
    //+------------------------------------------------------------------+
    double            CalculateLotSize(const ENUM_BIAS_DIR dir,
@@ -195,14 +219,16 @@ public:
      {
       outReason = "";
       double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-      if(balance <= 0.0)
+      double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(equity <= 0.0)
+         equity = balance;
+      if(balance <= 0.0 && equity <= 0.0)
         {
          outReason = "ZERO_ACCOUNT_BALANCE";
          return 0.0;
         }
 
-      double riskMoney = balance * (m_cfg.riskPercentPerTrade / 100.0);
-      double slDist    = MathAbs(entryPrice - slPrice);
+      double slDist = MathAbs(entryPrice - slPrice);
       if(slDist <= 0.0)
         {
          outReason = "INVALID_SL_DISTANCE";
@@ -210,33 +236,46 @@ public:
         }
 
       ENUM_ORDER_TYPE ordType = (dir == BIAS_BULL ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
-      double lossPerOneLot = 0.0;
-      if(!OrderCalcProfit(ordType, m_symbol, 1.0, entryPrice, slPrice, lossPerOneLot) ||
-         MathAbs(lossPerOneLot) <= 1e-5)
-        {
-         // Fallback to tick value / tick size
-         double tickVal  = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_VALUE);
-         double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
-         if(tickVal > 0.0 && tickSize > 0.0)
-            lossPerOneLot = (slDist / tickSize) * tickVal;
-        }
-      lossPerOneLot = MathAbs(lossPerOneLot);
-      if(lossPerOneLot <= 1e-5)
-        {
-         outReason = "ORDER_CALC_PROFIT_FAILED";
-         return 0.0;
-        }
-
-      double rawLot  = riskMoney / lossPerOneLot;
       double minLot  = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MIN);
       double maxLot  = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MAX);
       double lotStep = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+      double lot     = 0.0;
 
-      double lot = NormalizeVolume(rawLot, minLot, maxLot, lotStep);
-      if(lot < minLot)
+      if(m_cfg.useEquityStepLot && m_cfg.equityStepUsd > 0.0 && m_cfg.lotPerEquityStep > 0.0)
         {
-         outReason = StringFormat("LOT_BELOW_MIN (raw=%.4f < min=%.2f)", rawLot, minLot);
-         return 0.0;
+         lot = CalcEquityStepLot(equity, m_cfg.equityStepUsd, m_cfg.lotPerEquityStep, minLot, maxLot, lotStep);
+         if(lot < minLot)
+           {
+            outReason = StringFormat("LOT_BELOW_MIN (equity=%.2f < min=%.2f)", equity, minLot);
+            return 0.0;
+           }
+        }
+      else
+        {
+         double riskMoney = balance * (m_cfg.riskPercentPerTrade / 100.0);
+         double lossPerOneLot = 0.0;
+         if(!OrderCalcProfit(ordType, m_symbol, 1.0, entryPrice, slPrice, lossPerOneLot) ||
+            MathAbs(lossPerOneLot) <= 1e-5)
+           {
+            double tickVal  = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_VALUE);
+            double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+            if(tickVal > 0.0 && tickSize > 0.0)
+               lossPerOneLot = (slDist / tickSize) * tickVal;
+           }
+         lossPerOneLot = MathAbs(lossPerOneLot);
+         if(lossPerOneLot <= 1e-5)
+           {
+            outReason = "ORDER_CALC_PROFIT_FAILED";
+            return 0.0;
+           }
+
+         double rawLot = riskMoney / lossPerOneLot;
+         lot = NormalizeVolume(rawLot, minLot, maxLot, lotStep);
+         if(lot < minLot)
+           {
+            outReason = StringFormat("LOT_BELOW_MIN (raw=%.4f < min=%.2f)", rawLot, minLot);
+            return 0.0;
+           }
         }
 
       // Check free margin via OrderCalcMargin

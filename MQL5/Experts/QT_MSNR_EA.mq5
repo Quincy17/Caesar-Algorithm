@@ -93,17 +93,25 @@ input int                 InpMaxSetupBarsM5     = 36;                         //
 input ENUM_ENTRY_TYPE     InpEntryType          = ENTRY_FVG_CE;               // Entry Mode (FVG CE 50% / Proximal / Market MSS)
 input double              InpSlBufferAtrM5      = 0.20;                       // SL Buffer = mult * ATR(M5) + Spread
 input double              InpMaxSlAtrH1         = 2.50;                       // Skip Setup if SL > mult * ATR(H1)
+input double              InpTargetSlPips       = 60.0;                       // Target Manual SL Pips (60 pips = $6 on XAUUSD)
+input double              InpMinSlPips          = 45.0;                       // Minimum SL Distance (Pips)
+input double              InpMaxSlPips          = 75.0;                       // Maximum Structural SL Distance (Pips)
+input double              InpPartialTp1Pips     = 100.0;                      // Mandatory Partial TP1 + BE Pips (100 pips = $10)
+input double              InpRunnerTpPips       = 300.0;                      // Default Full TP Runner Pips (300 pips = $30)
 
 input group "=== 6. M8 & M12: Risk, Management & Friday Flat ==="
-input double              InpRiskPercent        = 0.50;                       // Risk % of Balance per Trade
+input bool                InpUseEquityStepLot   = true;                       // Patented Lot Mode: 0.05 Lot per $5,000 Equity
+input double              InpEquityStepUsd      = 5000.0;                     // Equity Step USD (Default $5,000)
+input double              InpLotPerEquityStep   = 0.05;                       // Lot Size per Equity Step (Default 0.05 Lot)
+input double              InpRiskPercent        = 0.50;                       // Fallback Risk % if EquityStepLot=false
 input double              InpMaxDailyLossPct    = 2.00;                       // Max Daily Loss % Circuit Breaker
 input double              InpMaxWeeklyLossPct   = 5.00;                       // Max Weekly Loss % Circuit Breaker
 input int                 InpMaxTradesPerDay    = 2;                          // Max Trades per Daye Trading Day
 input int                 InpMaxConsecLosses    = 3;                          // Pause Until Next Day after N Consecutive Losses
 input int                 InpMaxSpreadPoints    = 50;                         // Max Allowed Spread (Points)
-input bool                InpUseBreakEven1R     = true;                       // Move SL to Break-Even at +1R
+input bool                InpUseBreakEven1R     = true;                       // Move SL to Break-Even at TP1 (100 Pips)
 input double              InpBeBufferPoints     = 5.0;                        // Break-Even Buffer (Points)
-input bool                InpUsePartialTP1      = true;                       // Close 50% at Internal Liquidity TP1
+input bool                InpUsePartialTP1      = true;                       // Close 50% at Running 100 Pips (TP1)
 input bool                InpUseTimeStop        = true;                       // Enforce Profile Duration Time Stop
 input bool                InpFridayNoNewEntry   = true;                       // Block New Entries on Friday (Q0)
 input int                 InpFridayCloseHourNY  = 15;                         // Friday Forced Flat Hour (NY Time, default 15)
@@ -250,11 +258,19 @@ int OnInit()
    setCfg.slBufferAtrMultM5  = InpSlBufferAtrM5;
    setCfg.maxSlAtrMultH1     = InpMaxSlAtrH1;
    setCfg.useM15M5Refinement = InpUseM15M5Refinement;
+   setCfg.targetSlPips       = InpTargetSlPips;
+   setCfg.minSlPips          = InpMinSlPips;
+   setCfg.maxSlPips          = InpMaxSlPips;
+   setCfg.partialTp1Pips     = InpPartialTp1Pips;
+   setCfg.runnerTpPips       = InpRunnerTpPips;
    g_setup.Init(setCfg);
 
    // 8. Configure M8 Risk & Execution Engines
    SRiskConfig rcfg;
    rcfg.SetDefaults();
+   rcfg.useEquityStepLot     = InpUseEquityStepLot;
+   rcfg.equityStepUsd        = InpEquityStepUsd;
+   rcfg.lotPerEquityStep     = InpLotPerEquityStep;
    rcfg.riskPercentPerTrade  = InpRiskPercent;
    rcfg.maxDailyLossPercent  = InpMaxDailyLossPct;
    rcfg.maxWeeklyLossPercent = InpMaxWeeklyLossPct;
@@ -269,6 +285,7 @@ int OnInit()
    ecfg.useBreakEvenAt1R      = InpUseBreakEven1R;
    ecfg.breakEvenBufferPoints = InpBeBufferPoints;
    ecfg.usePartialCloseTP1    = InpUsePartialTP1;
+   ecfg.partialTp1Pips        = InpPartialTp1Pips;
    ecfg.useTimeStop           = InpUseTimeStop;
    g_exec.Init(_Symbol, ecfg);
 
@@ -367,7 +384,14 @@ void OnTick()
         }
      }
 
-   // 4. Manage Open Positions on every tick (MFE/MAE, Closed-Trade Journal, BE at 1R, Partial TP1, Time Stop)
+   // 3b. Gate: Cancel any pending limit orders if QT trading session/90m time window has ended
+   if(!g_qtState.isTimeAllowed && g_exec.CountPendingOrders() > 0)
+     {
+      g_exec.CancelPendingOrders(BIAS_NEUTRAL, "TIME_WINDOW_ENDED",
+                                 g_logger, g_qtState, g_profileSpec.profile);
+     }
+
+   // 4. Manage Open Positions on every tick (MFE/MAE, Closed-Trade Journal, BE + Partial TP1 at 100 Pips, Time Stop)
    g_exec.ManageActiveTrades(g_setup, g_msnr, g_risk, g_timeEngine, g_logger,
                              g_qtState, g_biasState, g_profileSpec,
                              g_mtf.GetATR(TF_IDX_M5), g_mtf.GetATR(TF_IDX_H1));
@@ -404,6 +428,12 @@ void OnTick()
          SSetupTracker evalSetup;
          if(g_setup.PopLastLogEvent(evalSetup))
             g_logger.LogSetup(evalSetup, g_qtState, g_biasState, g_profileSpec);
+
+         // Immediately cancel broker pending limit orders if their setup was invalidated or expired
+         if(g_setup.GetBuySetup().state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BULL) > 0)
+            g_exec.CancelPendingOrders(BIAS_BULL, "BUY_SETUP_INVALIDATED", g_logger, g_qtState, g_profileSpec.profile);
+         if(g_setup.GetSellSetup().state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BEAR) > 0)
+            g_exec.CancelPendingOrders(BIAS_BEAR, "SELL_SETUP_INVALIDATED", g_logger, g_qtState, g_profileSpec.profile);
         }
      }
 

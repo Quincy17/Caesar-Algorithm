@@ -89,7 +89,7 @@ void OnStart()
          StringFormat("Maximum Confluence Score calculation = %d (Expected 14)", sc.totalScore));
 
    //------------------------------------------------------------------
-   // 3. Risk Lot Size Normalization Verification (PRD 4.8)
+   // 3. Risk Lot Size Normalization & Patented Equity-Step Lot Verification
    //------------------------------------------------------------------
    Check(MathAbs(CRiskManager::NormalizeVolume(0.158, 0.01, 100.0, 0.01) - 0.15) < 1e-6,
          "NormalizeVolume floors 0.158 to 0.15 with step 0.01");
@@ -97,6 +97,17 @@ void OnStart()
          "NormalizeVolume returns 0.0 when raw lot (0.004) is below broker minLot (0.01)");
    Check(MathAbs(CRiskManager::NormalizeVolume(150.0, 0.01, 50.0, 0.01) - 50.0) < 1e-6,
          "NormalizeVolume clamps 150.0 to maxLot 50.0");
+
+   Check(MathAbs(CRiskManager::CalcEquityStepLot(5000.0, 5000.0, 0.05, 0.01, 100.0, 0.01) - 0.05) < 1e-6,
+         "CalcEquityStepLot: $5,000 USD equity -> 0.05 lot");
+   Check(MathAbs(CRiskManager::CalcEquityStepLot(10000.0, 5000.0, 0.05, 0.01, 100.0, 0.01) - 0.10) < 1e-6,
+         "CalcEquityStepLot: $10,000 USD equity -> 0.10 lot");
+   Check(MathAbs(CRiskManager::CalcEquityStepLot(25000.0, 5000.0, 0.05, 0.01, 100.0, 0.01) - 0.25) < 1e-6,
+         "CalcEquityStepLot: $25,000 USD equity -> 0.25 lot");
+   Check(MathAbs(QTPipsToPrice("XAUUSD", 100.0) - 10.0) < 1e-6 &&
+         MathAbs(QTPipsToPrice("XAUUSD", 60.0)  - 6.0)  < 1e-6 &&
+         MathAbs(QTPipsToPrice("XAUUSD", 300.0) - 30.0) < 1e-6,
+         "QTPipsToPrice(XAUUSD): 60 pips = $6.00, 100 pips = $10.00, 300 pips = $30.00");
 
    PrintFormat("=== TestSetupAndRisk finished: %d PASSED, %d FAILED ===", g_pass, g_fail);
   }

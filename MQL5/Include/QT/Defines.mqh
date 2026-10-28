@@ -288,5 +288,34 @@ string QTBiasToString(const ENUM_BIAS_DIR b)
    return "NEUTRAL";
   }
 
+//+------------------------------------------------------------------+
+//| Pip <-> Price Conversion Helpers                                 |
+//| On XAUUSD / GOLD: 1 pip = $0.10 (60 pips = $6, 100 pips = $10,   |
+//|                   300 pips = $30, e.g. 4100 -> 4110 = 100 pips)  |
+//| On Forex pairs  : 1 pip = 10 points (5/3-digit) or 1 point       |
+//+------------------------------------------------------------------+
+double QTPipsToPrice(const string symbol, const double pips)
+  {
+   string symUpper = (StringLen(symbol) > 0 ? symbol : _Symbol);
+   StringToUpper(symUpper);
+   if(StringFind(symUpper, "XAU") >= 0 || StringFind(symUpper, "GOLD") >= 0)
+      return pips * 0.10;
+
+   double pt  = SymbolInfoDouble(symUpper, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(symUpper, SYMBOL_DIGITS);
+   if(pt <= 0.0)
+      pt = 0.0001;
+   double pipSize = ((digits == 3 || digits == 5) ? pt * 10.0 : pt);
+   return pips * pipSize;
+  }
+
+double QTPriceToPips(const string symbol, const double priceDist)
+  {
+   double onePip = QTPipsToPrice(symbol, 1.0);
+   if(onePip <= 1e-9)
+      return 0.0;
+   return priceDist / onePip;
+  }
+
 #endif // QT_DEFINES_MQH
 //+------------------------------------------------------------------+
