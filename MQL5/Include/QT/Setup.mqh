@@ -3,14 +3,16 @@
 //| M7 - Setup State Machine (S0..S6), M15/M5 POI Refinement & Score |
 //| Place in: MQL5/Include/QT/Setup.mqh                              |
 //|                                                                  |
-//| State Machine per Direction (BUY / SELL):                        |
-//|  S0 IDLE      -> Bias aligned, Daye day & session/90m allowed    |
-//|  S1 POI_TOUCH -> Price touches Fresh MSNR POI (H4/H1/D1 + M15/M5)|
-//|  S2 SWEEP     -> Liquidity sweep inside/near POI on Trigger TF   |
-//|  S3 MSS       -> Body close breaks opposing swing (displacement) |
-//|  S4 ARMED     -> FVG / M15-M5 POI ready; Score & RR validated    |
-//|  S5 IN_TRADE  -> Order filled & active                           |
-//|  S6 DONE      -> Completed, expired, or invalidated              |
+//| State Machine Architecture (v1.21):                              |
+//|  1. HTF Anchor Trackers (m_buyHtf / m_sellHtf):                  |
+//|     - Dedicated to D1, H4, H1 MSNR Anchor POIs                   |
+//|     - Retains 100% v1.12 logic (+$959.98 net profit)             |
+//|  2. Daily Cycle Trackers (m_buyCycle / m_sellCycle):             |
+//|     - Dedicated to AMDX / XAMD Phase M & Phase D Daily Engine    |
+//|     - M15 POI Anchor only (M5 excluded)                          |
+//|     - Strict Phase M: Q3 only, D1 bias aligned, range >= 115 p   |
+//|     - Phase D & IRL->ERL as main daily entry engine              |
+//|     - Mon & Fri open exclusively for Phase D entries             |
 //+------------------------------------------------------------------+
 #ifndef QT_SETUP_MQH
 #define QT_SETUP_MQH
@@ -102,7 +104,7 @@ struct SSetupTracker
    ENUM_LIQ_NARRATIVE   narrative;         // NARRATIVE_ERL_TO_ERL, IRL_TO_ERL, ERL_TO_IRL
 
    // Layer 2: MSNR POI (HTF Anchor + optional M15/M5 Refinement)
-   SMSNRLevel           anchorPOI;        // Primary touched POI (e.g. H4/H1 or M15/M5)
+   SMSNRLevel           anchorPOI;        // Primary touched POI (e.g. H4/H1 or M15)
    bool                 hasRefinedPOI;    // True if a nested M15/M5 fresh POI refined the zone
    SMSNRLevel           refinedPOI;       // M15/M5 refined MSNR POI
    int                  poiOverlapCount;  // Multi-TF overlap count
@@ -130,13 +132,13 @@ struct SSetupTracker
 
    void Reset(const ENUM_BIAS_DIR dir = BIAS_BULL)
      {
-      setupId         = "";
-      direction       = dir;
-      state           = SETUP_S0_IDLE;
-      createdTime     = 0;
-      armedTime       = 0;
-      lastM5BarTime   = 0;
-      ageBarsM5       = 0;
+      setupId           = "";
+      direction         = dir;
+      state             = SETUP_S0_IDLE;
+      createdTime       = 0;
+      armedTime         = 0;
+      lastM5BarTime     = 0;
+      ageBarsM5         = 0;
       weekQ             = QT_Q0;
       dayQ              = QT_Q0;
       session           = QT_SESSION_ASIA;
@@ -146,24 +148,24 @@ struct SSetupTracker
       amdxPhase         = PHASE_NONE;
       narrative         = NARRATIVE_NONE;
       anchorPOI.Reset();
-      hasRefinedPOI   = false;
+      hasRefinedPOI     = false;
       refinedPOI.Reset();
-      poiOverlapCount = 0;
+      poiOverlapCount   = 0;
       sweep.Reset();
       mss.Reset();
-      hasFvg          = false;
+      hasFvg            = false;
       fvg.Reset();
-      isMarketOrder   = false;
-      entryPrice      = 0.0;
-      slPrice         = 0.0;
-      tpPrice         = 0.0;
-      tp1Price        = 0.0;
-      dolLabel        = "";
-      rrRatio         = 0.0;
+      isMarketOrder     = false;
+      entryPrice        = 0.0;
+      slPrice           = 0.0;
+      tpPrice           = 0.0;
+      tp1Price          = 0.0;
+      dolLabel          = "";
+      rrRatio           = 0.0;
       score.Reset();
-      statusNote      = "";
-      loggedToCsv     = false;
-      orderTicket     = 0;
+      statusNote        = "";
+      loggedToCsv       = false;
+      orderTicket       = 0;
      }
   };
 
@@ -189,13 +191,28 @@ class CSetupEngine
   {
 private:
    SSetupConfig      m_cfg;
-   SSetupTracker     m_buySetup;
-   SSetupTracker     m_sellSetup;
-   SSetupTracker     m_lastEvaluatedSetup; // Snapshot of most recent S4/rejected setup for CSV logging
-   bool              m_hasNewLogEvent;
+
+   // 1. HTF Anchor Trackers (Pure HTF v1.12 Engine: D1, H4, H1)
+   SSetupTracker     m_buyHtf;
+   SSetupTracker     m_sellHtf;
+
+   // 2. Daily Cycle Trackers (AMDX / XAMD Daily Engine: M15 POI)
+   SSetupTracker     m_buyCycle;
+   SSetupTracker     m_sellCycle;
+
+   // Log event queue for reliable CSV journaling without dropped setups
+   SSetupTracker     m_logQueue[];
+
    int               m_seqCounter;
    int               m_lastDailyCycleDayKey;
    int               m_dailyCycleTradesFilledToday;
+
+   void              PushLogEvent(const SSetupTracker &tr)
+     {
+      int cnt = ArraySize(m_logQueue);
+      ArrayResize(m_logQueue, cnt + 1);
+      m_logQueue[cnt] = tr;
+     }
 
    //--- Find a Fresh M15/M5 MSNR POI nested inside an HTF (W1/D1/H4/H1) Body-to-Wick Anchor Zone
    bool              FindNestedRefinedPOI(const SMSNRLevel &anchor,
@@ -205,7 +222,7 @@ private:
      {
       outRefined.Reset();
       if(anchor.tfIdx > TF_IDX_H1)
-         return false; // Anchor is already LTF (M15/M5)
+         return false; // Anchor is already LTF
 
       double zoneSpan = MathMax(anchor.tolerance * 2.0, anchor.zoneHigh - anchor.zoneLow);
       double nestLow  = anchor.zoneLow  - zoneSpan * 0.35;
@@ -228,7 +245,6 @@ private:
             if(lvl.direction != anchor.direction || !lvl.IsFreshForEntry(3))
                continue;
 
-            // Check if LTF POI price or zone is nested inside the HTF Body-to-Wick Anchor Zone
             bool isNested = (lvl.price >= nestLow && lvl.price <= nestHigh) ||
                             (lvl.zoneLow <= anchor.zoneHigh && lvl.zoneHigh >= anchor.zoneLow);
             if(!isNested)
@@ -250,30 +266,25 @@ private:
       return found;
      }
 
-   //--- Find best touched Fresh POI on allowed timeframes (HTF Anchor + AMDX/XAMD Phase M/D Daily Engine)
-   bool              FindTouchedPOI(const ENUM_BIAS_DIR dir,
-                                    const MqlRates &m5Bar,
-                                    CMSNREngine &msnr,
-                                    const STradeProfileSpec &prof,
-                                    const SBiasState &biasState,
-                                    const bool allowDailyLtfCycle,
-                                    SMSNRLevel &outAnchor,
-                                    bool &outHasRefined,
-                                    SMSNRLevel &outRefined,
-                                    int &outOverlaps,
-                                    bool &outIsDailyCycle) const
+   //--- Find Fresh HTF POI (W1, D1, H4, H1) for the Pure HTF Engine
+   bool              FindTouchedHTFPOI(const ENUM_BIAS_DIR dir,
+                                       const MqlRates &m5Bar,
+                                       CMSNREngine &msnr,
+                                       const STradeProfileSpec &prof,
+                                       SMSNRLevel &outAnchor,
+                                       bool &outHasRefined,
+                                       SMSNRLevel &outRefined,
+                                       int &outOverlaps) const
      {
       outAnchor.Reset();
-      outHasRefined   = false;
+      outHasRefined = false;
       outRefined.Reset();
-      outOverlaps     = 0;
-      outIsDailyCycle = false;
+      outOverlaps   = 0;
 
-      bool foundAnchor = false;
       double proximityMargin = m5Bar.high - m5Bar.low;
 
-      // 1. Scan from highest TF (W1=0) to lowest TF (M5=5) so HTF Body-to-Wick Anchor is captured first
-      for(int tf = TF_IDX_W1; tf < QT_MTF_COUNT; tf++)
+      // Scan strictly HTF Body-to-Wick Anchors: W1, D1, H4, H1
+      for(int tf = TF_IDX_W1; tf <= TF_IDX_H1; tf++)
         {
          if(!prof.allowPOITF[tf])
             continue;
@@ -287,130 +298,136 @@ private:
             if(lvl.direction != dir || !lvl.IsFreshForEntry(3))
                continue;
 
-            // For standalone LTF (M15/M5) Anchor POI without HTF zone, require confirmed Flip (RBS/SBR) or Quasimodo (QM)
-            if(tf >= TF_IDX_M15 &&
-               (lvl.type == POI_CLASSIC_A || lvl.type == POI_CLASSIC_V))
-               continue;
-
-            // Check if M5 closed bar touched or entered the MSNR Body-to-Wick Zone [zoneLow, zoneHigh]
             bool touched = (m5Bar.low <= lvl.zoneHigh + proximityMargin * 0.20 &&
                             m5Bar.high >= lvl.zoneLow - proximityMargin * 0.20);
             if(!touched)
                continue;
 
-            // Ensure body close did NOT already break past the distal wick of the POI zone
             if(dir == BIAS_BULL && m5Bar.close < lvl.zoneLow)
                continue;
             if(dir == BIAS_BEAR && m5Bar.close > lvl.zoneHigh)
                continue;
 
-            outAnchor       = lvl;
-            foundAnchor     = true;
-            outIsDailyCycle = (biasState.dailyCycle.isActive && biasState.dailyCycle.manipulationDir == dir);
-            break;
-           }
-         if(foundAnchor)
-            break;
-        }
-
-      // 2. Daily AMDX / XAMD Cycle Path (Phase M Extreme Entry & Phase D Low-Risk IRL Pullback)
-      if(!foundAnchor && m_cfg.enableDailyAmdxCycle && allowDailyLtfCycle &&
-         biasState.dailyCycle.isActive && biasState.dailyCycle.manipulationDir == dir)
-        {
-         double aHigh  = biasState.dailyCycle.phaseAHigh;
-         double aLow   = biasState.dailyCycle.phaseALow;
-         double aRange = MathMax(1.0, aHigh - aLow);
-         double aMid   = biasState.dailyCycle.phaseAMid;
-         ENUM_AMDX_PHASE curPhase = biasState.dailyCycle.currentPhase;
-
-         int ltfCands[2] = { TF_IDX_M15, TF_IDX_M5 };
-         for(int k = 0; k < 2; k++)
-           {
-            int tf = ltfCands[k];
-            int cnt = msnr.GetLevelCount(tf);
-            for(int i = 0; i < cnt; i++)
-              {
-               SMSNRLevel lvl;
-               if(!msnr.GetLevel(tf, i, lvl))
-                  continue;
-               if(lvl.direction != dir || !lvl.IsFreshForEntry(3))
-                  continue;
-
-               bool isFlipOrQm = (lvl.type == POI_RBS || lvl.type == POI_SBR ||
-                                  lvl.type == POI_QM_BULL || lvl.type == POI_QM_BEAR);
-
-               if(curPhase == PHASE_M)
-                 {
-                  // Phase M (Manipulation Extreme): POI must be near the swept Phase A High (Sell) or Low (Buy)
-                  if(dir == BIAS_BULL && lvl.price > aLow + 0.35 * aRange)
-                     continue;
-                  if(dir == BIAS_BEAR && lvl.price < aHigh - 0.35 * aRange)
-                     continue;
-                  // Require Flip/QM or an M15 Classic V/A right at the manipulation extreme
-                  if(!isFlipOrQm && tf != TF_IDX_M15)
-                     continue;
-                 }
-               else // PHASE_D (Distribution Pullback to IRL)
-                 {
-                  // Phase D (Low-Risk Distribution): Require confirmed Flip/QM IRL in Discount (Buy) / Premium (Sell)
-                  if(!isFlipOrQm)
-                     continue;
-                  if(dir == BIAS_BULL && m5Bar.close > aMid && !biasState.isBelowTrueDayOpen)
-                     continue;
-                  if(dir == BIAS_BEAR && m5Bar.close < aMid && !biasState.isAboveTrueDayOpen)
-                     continue;
-                 }
-
-               bool touched = (m5Bar.low <= lvl.zoneHigh + proximityMargin * 0.20 &&
-                               m5Bar.high >= lvl.zoneLow - proximityMargin * 0.20);
-               if(!touched)
-                  continue;
-
-               if(dir == BIAS_BULL && m5Bar.close < lvl.zoneLow)
-                  continue;
-               if(dir == BIAS_BEAR && m5Bar.close > lvl.zoneHigh)
-                  continue;
-
-               outAnchor       = lvl;
-               foundAnchor     = true;
-               outIsDailyCycle = true;
-               break;
-              }
-            if(foundAnchor)
-               break;
+            outAnchor = lvl;
+            if(m_cfg.useM15M5Refinement)
+               outHasRefined = FindNestedRefinedPOI(outAnchor, msnr, m5Bar.close, outRefined);
+            outOverlaps = msnr.CountMultiTFOverlaps(outAnchor);
+            if(outHasRefined && outOverlaps < 2)
+               outOverlaps = MathMin(2, outOverlaps + 1);
+            return true;
            }
         }
-
-      // 3. If Anchor found, search for Nested M15/M5 Refined POI & compute Multi-TF Overlap count
-      if(foundAnchor)
-        {
-         if(m_cfg.useM15M5Refinement && outAnchor.tfIdx <= TF_IDX_H1)
-            outHasRefined = FindNestedRefinedPOI(outAnchor, msnr, m5Bar.close, outRefined);
-
-         outOverlaps = msnr.CountMultiTFOverlaps(outAnchor);
-         if((outHasRefined || outIsDailyCycle) && outOverlaps < 2)
-            outOverlaps = MathMin(2, outOverlaps + 1);
-        }
-
-      return foundAnchor;
+      return false;
      }
 
-   //--- Detect Liquidity Sweep inside or near the active POI (including AMDX/XAMD Phase A Manipulation Sweep)
-   bool              CheckSweepForSetup(const SSetupTracker &tr,
-                                        CMTFDataManager &mtf,
-                                        CSwingEngine &swings,
-                                        CICTEngine &ict,
-                                        const STradeProfileSpec &prof,
-                                        const SBiasState &biasState,
-                                        SSweepEvent &outSweep) const
+   //--- Find Fresh M15 POI for the Daily AMDX/XAMD Cycle Engine
+   bool              FindTouchedCyclePOI(const ENUM_BIAS_DIR dir,
+                                         const MqlRates &m5Bar,
+                                         CMSNREngine &msnr,
+                                         const SBiasState &biasState,
+                                         const QTState &qtState,
+                                         SMSNRLevel &outAnchor,
+                                         int &outOverlaps) const
+     {
+      outAnchor.Reset();
+      outOverlaps = 0;
+
+      if(!m_cfg.enableDailyAmdxCycle || m_dailyCycleTradesFilledToday >= 1)
+         return false;
+
+      if(!biasState.dailyCycle.isActive || biasState.dailyCycle.manipulationDir != dir)
+         return false;
+
+      ENUM_AMDX_PHASE curPhase = biasState.dailyCycle.currentPhase;
+
+      // Point 6: On Monday & Friday (cycle-only days), strictly allow PHASE_D only!
+      if(qtState.isCycleOnlyDay && curPhase != PHASE_D)
+         return false;
+
+      double aHigh  = biasState.dailyCycle.phaseAHigh;
+      double aLow   = biasState.dailyCycle.phaseALow;
+      double aRange = MathAbs(aHigh - aLow);
+      double aMid   = biasState.dailyCycle.phaseAMid;
+
+      // Point 2: Stricter Phase M filters
+      if(curPhase == PHASE_M)
+        {
+         // 1. Only Q3 90-minute block (Sweep confirmation/expansion)
+         if(qtState.q90 != QT_Q3)
+            return false;
+         // 2. Must be strictly aligned with D1 bias!
+         if(biasState.biasD1 != dir)
+            return false;
+         // 3. Phase A range must be at least 115 pips ($11.50)
+         if(aRange < QTPipsToPrice(_Symbol, 115.0))
+            return false;
+        }
+
+      double proximityMargin = m5Bar.high - m5Bar.low;
+
+      // Point 5: M15 ONLY (M5 excluded from standalone cycle anchor!)
+      int tf = TF_IDX_M15;
+      int cnt = msnr.GetLevelCount(tf);
+      for(int i = 0; i < cnt; i++)
+        {
+         SMSNRLevel lvl;
+         if(!msnr.GetLevel(tf, i, lvl))
+            continue;
+         if(lvl.direction != dir || !lvl.IsFreshForEntry(3))
+            continue;
+
+         bool isFlipOrQm = (lvl.type == POI_RBS || lvl.type == POI_SBR ||
+                            lvl.type == POI_QM_BULL || lvl.type == POI_QM_BEAR);
+
+         if(curPhase == PHASE_M)
+           {
+            // Phase M (Manipulation Extreme): POI must be near the swept Phase A High (Sell) or Low (Buy)
+            if(dir == BIAS_BULL && lvl.price > aLow + 0.35 * aRange)
+               continue;
+            if(dir == BIAS_BEAR && lvl.price < aHigh - 0.35 * aRange)
+               continue;
+           }
+         else // PHASE_D (Distribution Pullback to IRL)
+           {
+            // Phase D: Require confirmed Flip/QM in Discount (Buy) / Premium (Sell)
+            if(!isFlipOrQm)
+               continue;
+            if(dir == BIAS_BULL && m5Bar.close > aMid && !biasState.isBelowTrueDayOpen)
+               continue;
+            if(dir == BIAS_BEAR && m5Bar.close < aMid && !biasState.isAboveTrueDayOpen)
+               continue;
+           }
+
+         bool touched = (m5Bar.low <= lvl.zoneHigh + proximityMargin * 0.20 &&
+                         m5Bar.high >= lvl.zoneLow - proximityMargin * 0.20);
+         if(!touched)
+            continue;
+
+         if(dir == BIAS_BULL && m5Bar.close < lvl.zoneLow)
+            continue;
+         if(dir == BIAS_BEAR && m5Bar.close > lvl.zoneHigh)
+            continue;
+
+         outAnchor   = lvl;
+         outOverlaps = MathMin(2, msnr.CountMultiTFOverlaps(outAnchor) + 1);
+         return true;
+        }
+      return false;
+     }
+
+   //--- Detect Liquidity Sweep for HTF Setup (Trigger TF M15 + Secondary Trigger M5)
+   bool              CheckSweepForHTFSetup(const SSetupTracker &tr,
+                                           CMTFDataManager &mtf,
+                                           CICTEngine &ict,
+                                           const STradeProfileSpec &prof,
+                                           SSweepEvent &outSweep) const
      {
       outSweep.Reset();
-
       SLiquidityPool pools[];
       int poolCnt = 0;
       ict.GetPoolsArray(pools, poolCnt);
 
-      // 1. Check on primary Trigger TF (e.g. M15 for Intraday/Scalp, H1 for Swing)
+      // 1. Primary Trigger TF (M15)
       MqlRates trigBar;
       if(mtf.GetClosedBar(prof.triggerTfIdx, 1, trigBar))
         {
@@ -418,15 +435,14 @@ private:
             return true;
         }
 
-      // 2. Check on secondary Trigger TF (e.g. M5 inside POI) for precision sweep
+      // 2. Secondary Trigger TF (M5)
       MqlRates secBar;
-      bool hasSecBar = mtf.GetClosedBar(prof.secondaryTriggerTfIdx, 1, secBar);
-      if(prof.secondaryTriggerTfIdx != prof.triggerTfIdx && hasSecBar)
+      if(prof.secondaryTriggerTfIdx != prof.triggerTfIdx &&
+         mtf.GetClosedBar(prof.secondaryTriggerTfIdx, 1, secBar))
         {
          if(CICTEngine::DetectSweepOnBar(secBar, 1, prof.secondaryTriggerTfIdx, pools, poolCnt, tr.direction, outSweep))
             return true;
 
-         // Also check if secBar swept the anchor/refined POI level itself and closed back inside!
          double poiPrice = (tr.hasRefinedPOI ? tr.refinedPOI.price : tr.anchorPOI.price);
          if(tr.direction == BIAS_BULL && secBar.low < poiPrice && secBar.close > poiPrice)
            {
@@ -439,7 +455,7 @@ private:
             outSweep.sweepClosedShift = 1;
             outSweep.sweptLevelPrice  = poiPrice;
             outSweep.extremeWickPrice = secBar.low;
-            outSweep.isMajorPool      = (tr.anchorPOI.tfIdx <= TF_IDX_H1 || tr.isDailyCycleSetup);
+            outSweep.isMajorPool      = true;
             return true;
            }
          if(tr.direction == BIAS_BEAR && secBar.high > poiPrice && secBar.close < poiPrice)
@@ -453,16 +469,32 @@ private:
             outSweep.sweepClosedShift = 1;
             outSweep.sweptLevelPrice  = poiPrice;
             outSweep.extremeWickPrice = secBar.high;
-            outSweep.isMajorPool      = (tr.anchorPOI.tfIdx <= TF_IDX_H1 || tr.isDailyCycleSetup);
+            outSweep.isMajorPool      = true;
             return true;
            }
         }
+      return false;
+     }
 
-      // 3. Daily AMDX / XAMD Manipulation Sweep Recognition (Multi-Candle Sweep of Phase A High/Low)
-      if(tr.isDailyCycleSetup && biasState.dailyCycle.isActive &&
-         biasState.dailyCycle.manipulationDir == tr.direction && hasSecBar)
+   //--- Detect Liquidity Sweep for Daily Cycle Setup (Swing Sweep + Phase A Manipulation Sweep)
+   bool              CheckSweepForCycleSetup(const SSetupTracker &tr,
+                                             CMTFDataManager &mtf,
+                                             CICTEngine &ict,
+                                             const STradeProfileSpec &prof,
+                                             const SBiasState &biasState,
+                                             SSweepEvent &outSweep) const
+     {
+      outSweep.Reset();
+
+      // 1. Check standard M15 / M5 swing sweep first
+      if(CheckSweepForHTFSetup(tr, mtf, ict, prof, outSweep))
+         return true;
+
+      // 2. Multi-Candle Sweep of Phase A High/Low
+      MqlRates secBar;
+      if(mtf.GetClosedBar(prof.secondaryTriggerTfIdx, 1, secBar))
         {
-         double poiPrice = (tr.hasRefinedPOI ? tr.refinedPOI.price : tr.anchorPOI.price);
+         double poiPrice = tr.anchorPOI.price;
          bool barRejected = (tr.direction == BIAS_BULL
                              ? (secBar.close > secBar.open && secBar.close >= poiPrice)
                              : (secBar.close < secBar.open && secBar.close <= poiPrice));
@@ -484,22 +516,21 @@ private:
             return true;
            }
         }
-
       return false;
      }
 
-   //--- Update a single directional setup state machine (BUY or SELL)
-   void              StepTracker(SSetupTracker &tr,
-                                 CMTFDataManager &mtf,
-                                 CSwingEngine &swings,
-                                 CMSNREngine &msnr,
-                                 CICTEngine &ict,
-                                 const QTState &qtState,
-                                 const SBiasState &biasState,
-                                 const STradeProfileSpec &prof,
-                                 const double currentSpreadPrice,
-                                 const bool isNewsBlocked,
-                                 const string newsReason)
+   //--- Step Machine for Pure HTF Setup (D1, H4, H1 Anchor)
+   void              StepHTFTracker(SSetupTracker &tr,
+                                    CMTFDataManager &mtf,
+                                    CSwingEngine &swings,
+                                    CMSNREngine &msnr,
+                                    CICTEngine &ict,
+                                    const QTState &qtState,
+                                    const SBiasState &biasState,
+                                    const STradeProfileSpec &prof,
+                                    const double currentSpreadPrice,
+                                    const bool isNewsBlocked,
+                                    const string newsReason)
      {
       MqlRates m5Bar;
       if(!mtf.GetClosedBar(TF_IDX_M5, 1, m5Bar))
@@ -516,66 +547,55 @@ private:
             tr.lastM5BarTime = m5Bar.time;
            }
 
-         // Common invalidation checks for active pre-trade setups (S1..S4)
          if(isNewsBlocked)
            {
-            tr.statusNote       = "REJECT_NEWS: " + newsReason;
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = "REJECT_NEWS: " + newsReason;
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
          if(!qtState.isTimeAllowed)
            {
-            tr.statusNote       = "CANCEL_TIME_WINDOW_ENDED";
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = "CANCEL_TIME_WINDOW_ENDED";
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
          if(!biasGateOk)
            {
-            tr.statusNote       = "CANCEL_BIAS_GATE_FLIPPED";
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = "CANCEL_BIAS_GATE_FLIPPED";
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
          if(tr.ageBarsM5 > m_cfg.maxSetupBarsM5)
            {
-            tr.statusNote       = "CANCEL_SETUP_EXPIRED_MAX_BARS";
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = "CANCEL_SETUP_EXPIRED_MAX_BARS";
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
-         // Check if anchor POI was broken by body close
          if((tr.direction == BIAS_BULL && m5Bar.close < tr.anchorPOI.zoneLow) ||
             (tr.direction == BIAS_BEAR && m5Bar.close > tr.anchorPOI.zoneHigh))
            {
-            tr.statusNote       = "CANCEL_POI_BODY_BROKEN";
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = "CANCEL_POI_BODY_BROKEN";
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
         }
 
-      //----------------------------------------------------------------
-      // STATE S0: IDLE -> Wait for allowed time + bias + Fresh POI touch
-      //----------------------------------------------------------------
+      // S0: IDLE -> Wait for allowed time + HTF bias + Fresh HTF POI touch
       if(tr.state == SETUP_S0_IDLE)
         {
          if(!biasGateOk || !qtState.isTimeAllowed || isNewsBlocked)
             return;
 
          SMSNRLevel anchor, refined;
-         bool hasRef     = false;
-         int overlaps    = 0;
-         bool isDailyCyc = false;
-         bool allowDailyLtfCycle = (m_dailyCycleTradesFilledToday < 1);
+         bool hasRef  = false;
+         int overlaps = 0;
 
-         if(FindTouchedPOI(tr.direction, m5Bar, msnr, prof, biasState, allowDailyLtfCycle, anchor, hasRef, refined, overlaps, isDailyCyc))
+         if(FindTouchedHTFPOI(tr.direction, m5Bar, msnr, prof, anchor, hasRef, refined, overlaps))
            {
             m_seqCounter++;
             tr.Reset(tr.direction);
@@ -595,9 +615,7 @@ private:
             tr.hasRefinedPOI      = hasRef;
             tr.refinedPOI         = refined;
             tr.poiOverlapCount    = overlaps;
-            tr.isDailyCycleSetup  = isDailyCyc;
-            tr.cycleType          = biasState.dailyCycle.cycleType;
-            tr.amdxPhase          = biasState.dailyCycle.currentPhase;
+            tr.isDailyCycleSetup  = false;
             tr.narrative          = biasState.dailyCycle.narrative;
             tr.statusNote         = "S1_POI_TOUCH";
            }
@@ -605,7 +623,7 @@ private:
 
       // Refresh nested M15/M5 Refined POI inside HTF Anchor Zone if one just formed
       if(tr.state >= SETUP_S1_POI_TOUCH && tr.state <= SETUP_S3_MSS &&
-         m_cfg.useM15M5Refinement && !tr.hasRefinedPOI && tr.anchorPOI.tfIdx <= TF_IDX_H1)
+         m_cfg.useM15M5Refinement && !tr.hasRefinedPOI)
         {
          SMSNRLevel candRef;
          if(FindNestedRefinedPOI(tr.anchorPOI, msnr, m5Bar.close, candRef))
@@ -616,13 +634,11 @@ private:
            }
         }
 
-      //----------------------------------------------------------------
-      // STATE S1: POI_TOUCH -> Wait for Liquidity Sweep inside/near POI
-      //----------------------------------------------------------------
+      // S1: POI_TOUCH -> Wait for Liquidity Sweep
       if(tr.state == SETUP_S1_POI_TOUCH)
         {
          SSweepEvent swEv;
-         if(CheckSweepForSetup(tr, mtf, swings, ict, prof, biasState, swEv))
+         if(CheckSweepForHTFSetup(tr, mtf, ict, prof, swEv))
            {
             tr.sweep      = swEv;
             tr.state      = SETUP_S2_SWEEP;
@@ -630,14 +646,11 @@ private:
            }
         }
 
-      //----------------------------------------------------------------
-      // STATE S2: SWEEP -> Wait for MSS (Body Close Displacement)
-      //----------------------------------------------------------------
+      // S2: SWEEP -> Wait for MSS
       if(tr.state == SETUP_S2_SWEEP)
         {
          if(!ict.GetConfig().useMSS)
            {
-            // MSS disabled by user parameter -> advance directly to S3_MSS
             tr.mss.confirmed        = true;
             tr.mss.direction        = tr.direction;
             tr.mss.tfIdx            = tr.sweep.triggerTfIdx;
@@ -649,7 +662,6 @@ private:
            }
          else
            {
-            // Check MSS on sweep's trigger TF or entry TF (M5)
             int checkTfs[2] = { tr.sweep.triggerTfIdx, prof.entryTfIdx };
             for(int k = 0; k < 2; k++)
               {
@@ -674,9 +686,7 @@ private:
            }
         }
 
-      //----------------------------------------------------------------
-      // STATE S3: MSS -> Wait for FVG / M15-M5 POI & Validate Score/RR
-      //----------------------------------------------------------------
+      // S3: MSS -> Wait for FVG & Validate Parameters
       if(tr.state == SETUP_S3_MSS)
         {
          SFVGZone fvgFound;
@@ -684,14 +694,13 @@ private:
          if(!gotFvg && prof.triggerTfIdx != prof.entryTfIdx)
             gotFvg = ict.FindRecentTradableFVG(prof.triggerTfIdx, tr.direction, tr.sweep.sweepBarTime, fvgFound);
 
-         // Wait for FVG unless entryType is Market on MSS or we have a fresh M15/M5 refined MSNR POI
          if(!gotFvg && m_cfg.entryType != ENTRY_MARKET_MSS && !tr.hasRefinedPOI)
             return;
 
          tr.hasFvg = gotFvg;
          tr.fvg    = fvgFound;
 
-         // 1. Determine Entry Price
+         // 1. Entry Price
          if(m_cfg.entryType == ENTRY_MARKET_MSS)
            {
             tr.isMarketOrder = true;
@@ -701,22 +710,18 @@ private:
            {
             tr.isMarketOrder = false;
             tr.entryPrice    = (m_cfg.entryType == ENTRY_FVG_CE ? fvgFound.ce : fvgFound.proximal);
-
-            // If a refined M15/M5 MSNR POI lies inside the FVG, refine entry to produce tighter SL
             if(tr.hasRefinedPOI &&
                tr.refinedPOI.price >= fvgFound.lowEdge &&
                tr.refinedPOI.price <= fvgFound.highEdge)
-              {
                tr.entryPrice = tr.refinedPOI.price;
-              }
            }
-         else // Fallback to refined M15/M5 MSNR POI limit
+         else
            {
             tr.isMarketOrder = false;
             tr.entryPrice    = tr.refinedPOI.price;
            }
 
-         // 2. Determine Stop Loss (Calibrated to User's Manual XAUUSD Style: 45-75 pips, target 60 pips = $6.00)
+         // 2. Stop Loss
          double atrM5    = mtf.GetATR(TF_IDX_M5);
          double atrH1    = mtf.GetATR(TF_IDX_H1);
          double slBuffer = m_cfg.slBufferAtrMultM5 * atrM5 + currentSpreadPrice;
@@ -731,34 +736,18 @@ private:
             if(tr.hasRefinedPOI && tr.refinedPOI.wickExtreme > 0.0 &&
                MathAbs(tr.entryPrice - tr.refinedPOI.wickExtreme) <= 0.8 * atrH1)
                baseLow = MathMin(baseLow, tr.refinedPOI.wickExtreme);
-            // If Phase M extreme sweep (ujung bawah), anchor SL below the Phase M sweep extreme if within range
-            if(tr.isDailyCycleSetup && tr.amdxPhase == PHASE_M &&
-               biasState.dailyCycle.activeSweepExtreme > 0.0 &&
-               MathAbs(tr.entryPrice - biasState.dailyCycle.activeSweepExtreme) <= 0.8 * atrH1)
-               baseLow = MathMin(baseLow, biasState.dailyCycle.activeSweepExtreme);
-
             tr.slPrice = baseLow - slBuffer;
 
             double rawSlDist = tr.entryPrice - tr.slPrice;
-            if(tr.anchorPOI.tfIdx >= TF_IDX_M15 && rawSlDist < QTPipsToPrice(_Symbol, 18.0))
-              {
-               tr.statusNote       = "REJECT_LTF_MICRO_NOISE_SL";
-               m_lastEvaluatedSetup = tr;
-               m_hasNewLogEvent    = true;
-               tr.Reset(tr.direction);
-               return;
-              }
             if(rawSlDist < minSlDist)
-               tr.slPrice = tr.entryPrice - targetSlDist; // Pad micro/invalid SL to 60 pips ($6.00)
+               tr.slPrice = tr.entryPrice - targetSlDist;
             else if(rawSlDist > maxSlDist && rawSlDist <= maxSlDist * 1.65)
-               tr.slPrice = tr.entryPrice - maxSlDist;    // Cap moderately wide structural SL to 75 pips ($7.50)
+               tr.slPrice = tr.entryPrice - maxSlDist;
 
-            // Ensure current M5 close has not already violated the calibrated SL
             if(m5Bar.close <= tr.slPrice)
               {
-               tr.statusNote       = "REJECT_PRICE_BELOW_SL";
-               m_lastEvaluatedSetup = tr;
-               m_hasNewLogEvent    = true;
+               tr.statusNote = "REJECT_PRICE_BELOW_SL";
+               PushLogEvent(tr);
                tr.Reset(tr.direction);
                return;
               }
@@ -769,34 +758,18 @@ private:
             if(tr.hasRefinedPOI && tr.refinedPOI.wickExtreme > 0.0 &&
                MathAbs(tr.refinedPOI.wickExtreme - tr.entryPrice) <= 0.8 * atrH1)
                baseHigh = MathMax(baseHigh, tr.refinedPOI.wickExtreme);
-            // If Phase M extreme sweep (ujung atas), anchor SL above the Phase M sweep extreme if within range
-            if(tr.isDailyCycleSetup && tr.amdxPhase == PHASE_M &&
-               biasState.dailyCycle.activeSweepExtreme > 0.0 &&
-               MathAbs(biasState.dailyCycle.activeSweepExtreme - tr.entryPrice) <= 0.8 * atrH1)
-               baseHigh = MathMax(baseHigh, biasState.dailyCycle.activeSweepExtreme);
-
             tr.slPrice = baseHigh + slBuffer;
 
             double rawSlDist = tr.slPrice - tr.entryPrice;
-            if(tr.anchorPOI.tfIdx >= TF_IDX_M15 && rawSlDist < QTPipsToPrice(_Symbol, 18.0))
-              {
-               tr.statusNote       = "REJECT_LTF_MICRO_NOISE_SL";
-               m_lastEvaluatedSetup = tr;
-               m_hasNewLogEvent    = true;
-               tr.Reset(tr.direction);
-               return;
-              }
             if(rawSlDist < minSlDist)
-               tr.slPrice = tr.entryPrice + targetSlDist; // Pad micro/invalid SL to 60 pips ($6.00)
+               tr.slPrice = tr.entryPrice + targetSlDist;
             else if(rawSlDist > maxSlDist && rawSlDist <= maxSlDist * 1.65)
-               tr.slPrice = tr.entryPrice + maxSlDist;    // Cap moderately wide structural SL to 75 pips ($7.50)
+               tr.slPrice = tr.entryPrice + maxSlDist;
 
-            // Ensure current M5 close has not already violated the calibrated SL
             if(m5Bar.close >= tr.slPrice)
               {
-               tr.statusNote       = "REJECT_PRICE_ABOVE_SL";
-               m_lastEvaluatedSetup = tr;
-               m_hasNewLogEvent    = true;
+               tr.statusNote = "REJECT_PRICE_ABOVE_SL";
+               PushLogEvent(tr);
                tr.Reset(tr.direction);
                return;
               }
@@ -806,25 +779,21 @@ private:
                                                     : (tr.slPrice - tr.entryPrice));
          if(slDist <= 1e-5)
            {
-            tr.statusNote       = "REJECT_INVALID_SL_DISTANCE";
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = "REJECT_INVALID_SL_DISTANCE";
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
 
-         // Check max SL width against calibrated maxSlDist * 1.65 & H1 ATR multiple
          if(slDist > maxSlDist * 1.65 || (atrH1 > 0.0 && slDist > m_cfg.maxSlAtrMultH1 * atrH1))
            {
-            tr.statusNote       = StringFormat("REJECT_SL_TOO_WIDE (%.2f pips)", QTPriceToPips(_Symbol, slDist));
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = StringFormat("REJECT_SL_TOO_WIDE (%.2f pips)", QTPriceToPips(_Symbol, slDist));
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
 
-         // 3. Determine Mandatory Partial TP1 (100 pips = $10.00) & Target TP
-         // For Daily AMDX/XAMD setups: Target is Phase A Swing High (BUY) or Phase A Swing Low (SELL)
+         // 3. Target TP
          SDOLTarget dolTarget = (tr.direction == BIAS_BULL ? biasState.bullDOL : biasState.bearDOL);
          double minRR         = (m_cfg.customMinRR > 0.0 ? m_cfg.customMinRR : prof.minRR);
 
@@ -832,38 +801,10 @@ private:
          double runnerDist    = QTPipsToPrice(_Symbol, (m_cfg.runnerTpPips   > 0.0 ? m_cfg.runnerTpPips   : 300.0));
          double minFullTpDist = MathMax(slDist * minRR, tp1Dist * 1.80);
 
-         // Mandatory Partial TP1 at 100 pips ($10.00)
          tr.tp1Price = (tr.direction == BIAS_BULL ? tr.entryPrice + tp1Dist : tr.entryPrice - tp1Dist);
 
          bool usedDol = false;
-
-         // Priority 1: Daily AMDX/XAMD Target -> Swing High Fase A (for BUY) / Swing Low Fase A (for SELL)
-         if(m_cfg.enableDailyAmdxCycle &&
-            (tr.isDailyCycleSetup || (biasState.dailyCycle.isActive && biasState.dailyCycle.manipulationDir == tr.direction)) &&
-            biasState.dailyCycle.phaseATargetPrice > 0.0)
-           {
-            double phaseADist = (tr.direction == BIAS_BULL ? (biasState.dailyCycle.phaseATargetPrice - tr.entryPrice)
-                                                           : (tr.entryPrice - biasState.dailyCycle.phaseATargetPrice));
-            // Must at least cover minRR and Partial TP1 (+100 pips) with a 15% runner margin
-            double minPhaseATpDist = MathMax(slDist * minRR, tp1Dist * 1.15);
-            if(phaseADist >= minPhaseATpDist && phaseADist <= runnerDist * 1.35)
-              {
-               tr.tpPrice           = biasState.dailyCycle.phaseATargetPrice;
-               tr.isDailyCycleSetup = true;
-               tr.cycleType         = biasState.dailyCycle.cycleType;
-               tr.amdxPhase         = biasState.dailyCycle.currentPhase;
-               tr.narrative         = biasState.dailyCycle.narrative;
-               tr.dolLabel          = StringFormat("%s_%s_%s",
-                                                   QTAmdxPhaseToString(tr.amdxPhase),
-                                                   (tr.direction == BIAS_BULL ? biasState.dailyCycle.phaseALabel + "_HIGH"
-                                                                              : biasState.dailyCycle.phaseALabel + "_LOW"),
-                                                   QTNarrativeToString(tr.narrative));
-               usedDol              = true;
-              }
-           }
-
-         // Priority 2: Standard HTF Draw on Liquidity (DOL)
-         if(!usedDol && dolTarget.valid)
+         if(dolTarget.valid)
            {
             double dolDist = (tr.direction == BIAS_BULL ? (dolTarget.price - tr.entryPrice)
                                                         : (tr.entryPrice - dolTarget.price));
@@ -878,16 +819,13 @@ private:
               }
            }
 
-         // Priority 3: Fallback Runner 300 pips (when Phase A range is narrower than 115 pips or DOL is beyond range)
          if(!usedDol)
            {
             double projDist = MathMax(runnerDist, minFullTpDist);
             tr.tpPrice  = (tr.direction == BIAS_BULL ? tr.entryPrice + projDist
                                                      : tr.entryPrice - projDist);
-            if(tr.isDailyCycleSetup && tr.narrative != NARRATIVE_NONE)
-               tr.dolLabel = StringFormat("%s_RUNNER_300P_%s",
-                                          QTAmdxPhaseToString(tr.amdxPhase),
-                                          QTNarrativeToString(tr.narrative));
+            if(tr.narrative != NARRATIVE_NONE)
+               tr.dolLabel = StringFormat("RUNNER_300P_%s", QTNarrativeToString(tr.narrative));
             else
                tr.dolLabel = "RUNNER_300P";
            }
@@ -898,55 +836,45 @@ private:
 
          if(tr.rrRatio + 1e-5 < minRR)
            {
-            tr.statusNote       = StringFormat("REJECT_RR_BELOW_MIN (%.2f < %.2f)", tr.rrRatio, minRR);
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = StringFormat("REJECT_RR_BELOW_MIN (%.2f < %.2f)", tr.rrRatio, minRR);
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
 
-         // 4. Calculate Confluence Score (PRD 4.7 + 4.10)
+         // 4. Confluence Score
          CalcConfluenceScore(tr, qtState, biasState, prof, tr.score);
-         int reqScore = (tr.anchorPOI.tfIdx >= TF_IDX_M15 ? MathMax(m_cfg.minConfluenceScore, 8)
-                                                          : m_cfg.minConfluenceScore);
-         if(tr.score.totalScore < reqScore)
+         if(tr.score.totalScore < m_cfg.minConfluenceScore)
            {
-            tr.statusNote       = StringFormat("REJECT_LOW_SCORE (%d < %d)",
-                                               tr.score.totalScore, reqScore);
-            m_lastEvaluatedSetup = tr;
-            m_hasNewLogEvent    = true;
+            tr.statusNote = StringFormat("REJECT_LOW_SCORE (%d < %d)",
+                                         tr.score.totalScore, m_cfg.minConfluenceScore);
+            PushLogEvent(tr);
             tr.Reset(tr.direction);
             return;
            }
 
-         // All mandatory gates passed -> S4_ARMED!
-         tr.state            = SETUP_S4_ARMED;
-         tr.armedTime        = qtState.serverTime;
-         tr.statusNote       = "ARMED_VALID";
-         m_lastEvaluatedSetup = tr;
-         m_hasNewLogEvent    = true;
+         tr.state      = SETUP_S4_ARMED;
+         tr.armedTime  = qtState.serverTime;
+         tr.statusNote = "ARMED_VALID";
+         PushLogEvent(tr);
         }
 
-      //----------------------------------------------------------------
-      // STATE S4: ARMED -> Invalidate if price hits SL or TP before fill
-      //----------------------------------------------------------------
+      // S4: ARMED -> Price cancellation check
       if(tr.state == SETUP_S4_ARMED)
         {
          if(tr.direction == BIAS_BULL)
            {
             if(m5Bar.low <= tr.slPrice)
               {
-               tr.statusNote       = "CANCEL_HIT_SL_BEFORE_ENTRY";
-               m_lastEvaluatedSetup = tr;
-               m_hasNewLogEvent    = true;
+               tr.statusNote = "CANCEL_HIT_SL_BEFORE_ENTRY";
+               PushLogEvent(tr);
                tr.Reset(tr.direction);
                return;
               }
             if(m5Bar.high >= tr.tpPrice)
               {
-               tr.statusNote       = "CANCEL_HIT_TP_BEFORE_ENTRY";
-               m_lastEvaluatedSetup = tr;
-               m_hasNewLogEvent    = true;
+               tr.statusNote = "CANCEL_HIT_TP_BEFORE_ENTRY";
+               PushLogEvent(tr);
                tr.Reset(tr.direction);
                return;
               }
@@ -955,17 +883,449 @@ private:
            {
             if(m5Bar.high >= tr.slPrice)
               {
-               tr.statusNote       = "CANCEL_HIT_SL_BEFORE_ENTRY";
-               m_lastEvaluatedSetup = tr;
-               m_hasNewLogEvent    = true;
+               tr.statusNote = "CANCEL_HIT_SL_BEFORE_ENTRY";
+               PushLogEvent(tr);
                tr.Reset(tr.direction);
                return;
               }
             if(m5Bar.low <= tr.tpPrice)
               {
-               tr.statusNote       = "CANCEL_HIT_TP_BEFORE_ENTRY";
-               m_lastEvaluatedSetup = tr;
-               m_hasNewLogEvent    = true;
+               tr.statusNote = "CANCEL_HIT_TP_BEFORE_ENTRY";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+           }
+        }
+     }
+
+   //--- Step Machine for Daily Cycle Setup (M15 Anchor, Phase M & Phase D Engine)
+   void              StepCycleTracker(SSetupTracker &tr,
+                                      CMTFDataManager &mtf,
+                                      CSwingEngine &swings,
+                                      CMSNREngine &msnr,
+                                      CICTEngine &ict,
+                                      const QTState &qtState,
+                                      const SBiasState &biasState,
+                                      const STradeProfileSpec &prof,
+                                      const double currentSpreadPrice,
+                                      const bool isNewsBlocked,
+                                      const string newsReason)
+     {
+      MqlRates m5Bar;
+      if(!mtf.GetClosedBar(TF_IDX_M5, 1, m5Bar))
+         return;
+
+      bool cycleGateOk = (tr.direction == BIAS_BULL ? biasState.allowBuyCycle : biasState.allowSellCycle);
+
+      // Invalidation checks for active pre-trade setup (S1..S4)
+      if(tr.state >= SETUP_S1_POI_TOUCH && tr.state <= SETUP_S4_ARMED)
+        {
+         if(m5Bar.time > tr.lastM5BarTime)
+           {
+            tr.ageBarsM5++;
+            tr.lastM5BarTime = m5Bar.time;
+           }
+
+         if(isNewsBlocked)
+           {
+            tr.statusNote = "REJECT_NEWS: " + newsReason;
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+         if(!qtState.isCycleTimeAllowed)
+           {
+            tr.statusNote = "CANCEL_TIME_WINDOW_ENDED";
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+         if(!cycleGateOk)
+           {
+            tr.statusNote = "CANCEL_BIAS_GATE_FLIPPED";
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+         // Point 6: On Monday & Friday (cycle-only days), strictly allow PHASE_D only
+         if(qtState.isCycleOnlyDay && biasState.dailyCycle.currentPhase != PHASE_D)
+           {
+            tr.statusNote = "CANCEL_CYCLE_DAY_PHASE_NOT_D";
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+         if(tr.ageBarsM5 > m_cfg.maxSetupBarsM5)
+           {
+            tr.statusNote = "CANCEL_SETUP_EXPIRED_MAX_BARS";
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+         if((tr.direction == BIAS_BULL && m5Bar.close < tr.anchorPOI.zoneLow) ||
+            (tr.direction == BIAS_BEAR && m5Bar.close > tr.anchorPOI.zoneHigh))
+           {
+            tr.statusNote = "CANCEL_POI_BODY_BROKEN";
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+        }
+
+      // S0: IDLE -> Wait for cycle permission + Fresh M15 POI touch
+      if(tr.state == SETUP_S0_IDLE)
+        {
+         if(!cycleGateOk || !qtState.isCycleTimeAllowed || isNewsBlocked)
+            return;
+
+         SMSNRLevel anchor;
+         int overlaps = 0;
+
+         if(FindTouchedCyclePOI(tr.direction, m5Bar, msnr, biasState, qtState, anchor, overlaps))
+           {
+            m_seqCounter++;
+            tr.Reset(tr.direction);
+            tr.setupId            = StringFormat("QT_CYC_%s_%I64d_%d",
+                                                 (tr.direction == BIAS_BULL ? "BUY" : "SELL"),
+                                                 (long)m5Bar.time,
+                                                 m_seqCounter);
+            tr.state              = SETUP_S1_POI_TOUCH;
+            tr.createdTime        = qtState.serverTime;
+            tr.lastM5BarTime      = m5Bar.time;
+            tr.ageBarsM5          = 0;
+            tr.weekQ              = qtState.weekQ;
+            tr.dayQ               = qtState.dayQ;
+            tr.session            = qtState.session;
+            tr.q90                = qtState.q90;
+            tr.anchorPOI          = anchor;
+            tr.hasRefinedPOI      = false;
+            tr.poiOverlapCount    = overlaps;
+            tr.isDailyCycleSetup  = true;
+            tr.cycleType          = biasState.dailyCycle.cycleType;
+            tr.amdxPhase          = biasState.dailyCycle.currentPhase;
+            tr.narrative          = biasState.dailyCycle.narrative;
+            tr.statusNote         = "S1_POI_TOUCH";
+           }
+        }
+
+      // S1: POI_TOUCH -> Wait for Sweep
+      if(tr.state == SETUP_S1_POI_TOUCH)
+        {
+         SSweepEvent swEv;
+         if(CheckSweepForCycleSetup(tr, mtf, ict, prof, biasState, swEv))
+           {
+            tr.sweep      = swEv;
+            tr.state      = SETUP_S2_SWEEP;
+            tr.statusNote = "S2_SWEEP_CONFIRMED";
+           }
+        }
+
+      // S2: SWEEP -> Wait for MSS
+      if(tr.state == SETUP_S2_SWEEP)
+        {
+         if(!ict.GetConfig().useMSS)
+           {
+            tr.mss.confirmed        = true;
+            tr.mss.direction        = tr.direction;
+            tr.mss.tfIdx            = tr.sweep.triggerTfIdx;
+            tr.mss.mssBarTime       = m5Bar.time;
+            tr.mss.mssClosedShift   = 1;
+            tr.mss.brokenSwingPrice = tr.sweep.sweptLevelPrice;
+            tr.state                = SETUP_S3_MSS;
+            tr.statusNote           = "S3_MSS_BYPASSED";
+           }
+         else
+           {
+            int checkTfs[2] = { tr.sweep.triggerTfIdx, prof.entryTfIdx };
+            for(int k = 0; k < 2; k++)
+              {
+               int tfIdx = checkTfs[k];
+               MqlRates tRates[];
+               int rCnt = mtf.GetClosedRatesArray(tfIdx, tRates);
+               int sCnt = swings.GetWickSwingCount(tfIdx);
+               SSwingPoint wSwings[];
+               ArrayResize(wSwings, sCnt);
+               for(int i = 0; i < sCnt; i++)
+                  swings.GetWickSwing(tfIdx, i, wSwings[i]);
+
+               SMSSResult mssRes;
+               if(CICTEngine::CheckMSSAfterSweep(tRates, rCnt, wSwings, sCnt, tr.sweep, tfIdx, mssRes))
+                 {
+                  tr.mss        = mssRes;
+                  tr.state      = SETUP_S3_MSS;
+                  tr.statusNote = "S3_MSS_CONFIRMED";
+                  break;
+                 }
+              }
+           }
+        }
+
+      // S3: MSS -> Wait for FVG & Validate Parameters
+      if(tr.state == SETUP_S3_MSS)
+        {
+         SFVGZone fvgFound;
+         bool gotFvg = ict.FindRecentTradableFVG(prof.entryTfIdx, tr.direction, tr.sweep.sweepBarTime, fvgFound);
+         if(!gotFvg && prof.triggerTfIdx != prof.entryTfIdx)
+            gotFvg = ict.FindRecentTradableFVG(prof.triggerTfIdx, tr.direction, tr.sweep.sweepBarTime, fvgFound);
+
+         if(!gotFvg && m_cfg.entryType != ENTRY_MARKET_MSS)
+            return;
+
+         tr.hasFvg = gotFvg;
+         tr.fvg    = fvgFound;
+
+         // 1. Entry Price
+         if(m_cfg.entryType == ENTRY_MARKET_MSS)
+           {
+            tr.isMarketOrder = true;
+            tr.entryPrice    = m5Bar.close;
+           }
+         else if(gotFvg)
+           {
+            tr.isMarketOrder = false;
+            tr.entryPrice    = (m_cfg.entryType == ENTRY_FVG_CE ? fvgFound.ce : fvgFound.proximal);
+           }
+         else
+           {
+            tr.isMarketOrder = false;
+            tr.entryPrice    = tr.anchorPOI.price;
+           }
+
+         // 2. Stop Loss (Calibrated: 45-75 pips, target 60 pips)
+         double atrM5    = mtf.GetATR(TF_IDX_M5);
+         double atrH1    = mtf.GetATR(TF_IDX_H1);
+         double slBuffer = m_cfg.slBufferAtrMultM5 * atrM5 + currentSpreadPrice;
+
+         double minSlDist    = QTPipsToPrice(_Symbol, (m_cfg.minSlPips    > 0.0 ? m_cfg.minSlPips    : 45.0));
+         double targetSlDist = QTPipsToPrice(_Symbol, (m_cfg.targetSlPips > 0.0 ? m_cfg.targetSlPips : 60.0));
+         double maxSlDist    = QTPipsToPrice(_Symbol, (m_cfg.maxSlPips    > 0.0 ? m_cfg.maxSlPips    : 75.0));
+
+         if(tr.direction == BIAS_BULL)
+           {
+            double baseLow = MathMin(tr.sweep.extremeWickPrice, m5Bar.low);
+            // Anchor SL below Phase M sweep extreme if within range
+            if(tr.amdxPhase == PHASE_M && biasState.dailyCycle.activeSweepExtreme > 0.0 &&
+               MathAbs(tr.entryPrice - biasState.dailyCycle.activeSweepExtreme) <= 0.8 * atrH1)
+               baseLow = MathMin(baseLow, biasState.dailyCycle.activeSweepExtreme);
+
+            tr.slPrice = baseLow - slBuffer;
+
+            double rawSlDist = tr.entryPrice - tr.slPrice;
+            if(rawSlDist < QTPipsToPrice(_Symbol, 18.0))
+              {
+               tr.statusNote = "REJECT_LTF_MICRO_NOISE_SL";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+            if(rawSlDist < minSlDist)
+               tr.slPrice = tr.entryPrice - targetSlDist;
+            else if(rawSlDist > maxSlDist && rawSlDist <= maxSlDist * 1.65)
+               tr.slPrice = tr.entryPrice - maxSlDist;
+
+            if(m5Bar.close <= tr.slPrice)
+              {
+               tr.statusNote = "REJECT_PRICE_BELOW_SL";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+           }
+         else
+           {
+            double baseHigh = MathMax(tr.sweep.extremeWickPrice, m5Bar.high);
+            // Anchor SL above Phase M sweep extreme if within range
+            if(tr.amdxPhase == PHASE_M && biasState.dailyCycle.activeSweepExtreme > 0.0 &&
+               MathAbs(biasState.dailyCycle.activeSweepExtreme - tr.entryPrice) <= 0.8 * atrH1)
+               baseHigh = MathMax(baseHigh, biasState.dailyCycle.activeSweepExtreme);
+
+            tr.slPrice = baseHigh + slBuffer;
+
+            double rawSlDist = tr.slPrice - tr.entryPrice;
+            if(rawSlDist < QTPipsToPrice(_Symbol, 18.0))
+              {
+               tr.statusNote = "REJECT_LTF_MICRO_NOISE_SL";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+            if(rawSlDist < minSlDist)
+               tr.slPrice = tr.entryPrice + targetSlDist;
+            else if(rawSlDist > maxSlDist && rawSlDist <= maxSlDist * 1.65)
+               tr.slPrice = tr.entryPrice + maxSlDist;
+
+            if(m5Bar.close >= tr.slPrice)
+              {
+               tr.statusNote = "REJECT_PRICE_ABOVE_SL";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+           }
+
+         double slDist = (tr.direction == BIAS_BULL ? (tr.entryPrice - tr.slPrice)
+                                                    : (tr.slPrice - tr.entryPrice));
+         if(slDist <= 1e-5)
+           {
+            tr.statusNote = "REJECT_INVALID_SL_DISTANCE";
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+
+         if(slDist > maxSlDist * 1.65 || (atrH1 > 0.0 && slDist > m_cfg.maxSlAtrMultH1 * atrH1))
+           {
+            tr.statusNote = StringFormat("REJECT_SL_TOO_WIDE (%.2f pips)", QTPriceToPips(_Symbol, slDist));
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+
+         // 3. Target Determination (Phase M vs Phase D)
+         SDOLTarget dolTarget = (tr.direction == BIAS_BULL ? biasState.bullDOL : biasState.bearDOL);
+         double minRR         = (m_cfg.customMinRR > 0.0 ? m_cfg.customMinRR : prof.minRR);
+
+         double tp1Dist       = QTPipsToPrice(_Symbol, (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+         double runnerDist    = QTPipsToPrice(_Symbol, (m_cfg.runnerTpPips   > 0.0 ? m_cfg.runnerTpPips   : 300.0));
+         double minPhaseADist = MathMax(slDist * minRR, tp1Dist * 1.15);
+
+         tr.tp1Price = (tr.direction == BIAS_BULL ? tr.entryPrice + tp1Dist : tr.entryPrice - tp1Dist);
+
+         bool targetValid = false;
+
+         if(tr.amdxPhase == PHASE_M)
+           {
+            // Point 2: Phase M MUST target Phase A High (BUY) / Low (SELL). Do NOT fallback to runner!
+            if(biasState.dailyCycle.phaseATargetPrice > 0.0)
+              {
+               double phaseADist = (tr.direction == BIAS_BULL
+                                    ? (biasState.dailyCycle.phaseATargetPrice - tr.entryPrice)
+                                    : (tr.entryPrice - biasState.dailyCycle.phaseATargetPrice));
+               if(phaseADist >= minPhaseADist && phaseADist <= runnerDist * 1.35)
+                 {
+                  tr.tpPrice     = biasState.dailyCycle.phaseATargetPrice;
+                  tr.dolLabel    = StringFormat("PHASE_M_%s_%s",
+                                                (tr.direction == BIAS_BULL ? biasState.dailyCycle.phaseALabel + "_HIGH"
+                                                                           : biasState.dailyCycle.phaseALabel + "_LOW"),
+                                                QTNarrativeToString(tr.narrative));
+                  targetValid    = true;
+                 }
+              }
+            if(!targetValid)
+              {
+               // Phase A range is too narrow or distance insufficient -> REJECT (never fallback to runner on Phase M)
+               tr.statusNote = "REJECT_PHASE_M_TARGET_TOO_CLOSE";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+           }
+         else // PHASE_D (Distribution Pullback to IRL)
+           {
+            // Priority 1: Phase A Target
+            if(biasState.dailyCycle.phaseATargetPrice > 0.0)
+              {
+               double phaseADist = (tr.direction == BIAS_BULL
+                                    ? (biasState.dailyCycle.phaseATargetPrice - tr.entryPrice)
+                                    : (tr.entryPrice - biasState.dailyCycle.phaseATargetPrice));
+               if(phaseADist >= minPhaseADist && phaseADist <= runnerDist * 1.35)
+                 {
+                  tr.tpPrice     = biasState.dailyCycle.phaseATargetPrice;
+                  tr.dolLabel    = StringFormat("PHASE_D_%s_%s",
+                                                (tr.direction == BIAS_BULL ? biasState.dailyCycle.phaseALabel + "_HIGH"
+                                                                           : biasState.dailyCycle.phaseALabel + "_LOW"),
+                                                QTNarrativeToString(tr.narrative));
+                  targetValid    = true;
+                 }
+              }
+            // Priority 2: Standard DOL
+            double minFullTpDist = MathMax(slDist * minRR, tp1Dist * 1.80);
+            if(!targetValid && dolTarget.valid)
+              {
+               double dolDist = (tr.direction == BIAS_BULL ? (dolTarget.price - tr.entryPrice)
+                                                           : (tr.entryPrice - dolTarget.price));
+               if(dolDist >= minFullTpDist && dolDist <= runnerDist * 1.25)
+                 {
+                  tr.tpPrice  = dolTarget.price;
+                  tr.dolLabel = StringFormat("%s_%s", dolTarget.label, QTNarrativeToString(tr.narrative));
+                  targetValid = true;
+                 }
+              }
+            // Priority 3: Fallback Runner 300 pips for Phase D
+            if(!targetValid)
+              {
+               double projDist = MathMax(runnerDist, minFullTpDist);
+               tr.tpPrice  = (tr.direction == BIAS_BULL ? tr.entryPrice + projDist
+                                                        : tr.entryPrice - projDist);
+               tr.dolLabel = StringFormat("PHASE_D_RUNNER_300P_%s", QTNarrativeToString(tr.narrative));
+               targetValid = true;
+              }
+           }
+
+         double reward = (tr.direction == BIAS_BULL ? (tr.tpPrice - tr.entryPrice)
+                                                    : (tr.entryPrice - tr.tpPrice));
+         tr.rrRatio = (reward > 0.0 ? reward / slDist : 0.0);
+
+         if(tr.rrRatio + 1e-5 < minRR)
+           {
+            tr.statusNote = StringFormat("REJECT_RR_BELOW_MIN (%.2f < %.2f)", tr.rrRatio, minRR);
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+
+         // 4. Confluence Score (Minimum 8 for LTF Cycle Setups)
+         CalcConfluenceScore(tr, qtState, biasState, prof, tr.score);
+         int reqScore = MathMax(m_cfg.minConfluenceScore, 8);
+         if(tr.score.totalScore < reqScore)
+           {
+            tr.statusNote = StringFormat("REJECT_LOW_SCORE (%d < %d)",
+                                         tr.score.totalScore, reqScore);
+            PushLogEvent(tr);
+            tr.Reset(tr.direction);
+            return;
+           }
+
+         tr.state      = SETUP_S4_ARMED;
+         tr.armedTime  = qtState.serverTime;
+         tr.statusNote = "ARMED_VALID";
+         PushLogEvent(tr);
+        }
+
+      // S4: ARMED -> Price cancellation check
+      if(tr.state == SETUP_S4_ARMED)
+        {
+         if(tr.direction == BIAS_BULL)
+           {
+            if(m5Bar.low <= tr.slPrice)
+              {
+               tr.statusNote = "CANCEL_HIT_SL_BEFORE_ENTRY";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+            if(m5Bar.high >= tr.tpPrice)
+              {
+               tr.statusNote = "CANCEL_HIT_TP_BEFORE_ENTRY";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+           }
+         else
+           {
+            if(m5Bar.high >= tr.slPrice)
+              {
+               tr.statusNote = "CANCEL_HIT_SL_BEFORE_ENTRY";
+               PushLogEvent(tr);
+               tr.Reset(tr.direction);
+               return;
+              }
+            if(m5Bar.low <= tr.tpPrice)
+              {
+               tr.statusNote = "CANCEL_HIT_TP_BEFORE_ENTRY";
+               PushLogEvent(tr);
                tr.Reset(tr.direction);
                return;
               }
@@ -977,10 +1337,11 @@ public:
                      CSetupEngine()
      {
       m_cfg.SetDefaults();
-      m_buySetup.Reset(BIAS_BULL);
-      m_sellSetup.Reset(BIAS_BEAR);
-      m_lastEvaluatedSetup.Reset(BIAS_BULL);
-      m_hasNewLogEvent              = false;
+      m_buyHtf.Reset(BIAS_BULL);
+      m_sellHtf.Reset(BIAS_BEAR);
+      m_buyCycle.Reset(BIAS_BULL);
+      m_sellCycle.Reset(BIAS_BEAR);
+      ArrayResize(m_logQueue, 0);
       m_seqCounter                  = 0;
       m_lastDailyCycleDayKey        = 0;
       m_dailyCycleTradesFilledToday = 0;
@@ -989,24 +1350,53 @@ public:
    void              Init(const SSetupConfig &cfg)
      {
       m_cfg = cfg;
-      m_buySetup.Reset(BIAS_BULL);
-      m_sellSetup.Reset(BIAS_BEAR);
-      m_lastEvaluatedSetup.Reset(BIAS_BULL);
-      m_hasNewLogEvent              = false;
+      m_buyHtf.Reset(BIAS_BULL);
+      m_sellHtf.Reset(BIAS_BEAR);
+      m_buyCycle.Reset(BIAS_BULL);
+      m_sellCycle.Reset(BIAS_BEAR);
+      ArrayResize(m_logQueue, 0);
       m_lastDailyCycleDayKey        = 0;
       m_dailyCycleTradesFilledToday = 0;
      }
 
    SSetupConfig      GetConfig() const { return m_cfg; }
-   SSetupTracker     GetBuySetup()  const { return m_buySetup; }
-   SSetupTracker     GetSellSetup() const { return m_sellSetup; }
+
+   // Prioritize HTF setup; fallback to Daily Cycle setup
+   SSetupTracker     GetBuySetup() const
+     {
+      if(m_buyHtf.orderTicket > 0 || m_buyHtf.state == SETUP_S4_ARMED)
+         return m_buyHtf;
+      if(m_buyCycle.orderTicket > 0 || m_buyCycle.state == SETUP_S4_ARMED)
+         return m_buyCycle;
+      if(m_buyHtf.state != SETUP_S0_IDLE)
+         return m_buyHtf;
+      if(m_buyCycle.state != SETUP_S0_IDLE)
+         return m_buyCycle;
+      return m_buyHtf;
+     }
+
+   SSetupTracker     GetSellSetup() const
+     {
+      if(m_sellHtf.orderTicket > 0 || m_sellHtf.state == SETUP_S4_ARMED)
+         return m_sellHtf;
+      if(m_sellCycle.orderTicket > 0 || m_sellCycle.state == SETUP_S4_ARMED)
+         return m_sellCycle;
+      if(m_sellHtf.state != SETUP_S0_IDLE)
+         return m_sellHtf;
+      if(m_sellCycle.state != SETUP_S0_IDLE)
+         return m_sellCycle;
+      return m_sellHtf;
+     }
 
    bool              PopLastLogEvent(SSetupTracker &outSetup)
      {
-      if(!m_hasNewLogEvent)
+      int cnt = ArraySize(m_logQueue);
+      if(cnt <= 0)
          return false;
-      outSetup         = m_lastEvaluatedSetup;
-      m_hasNewLogEvent = false;
+      outSetup = m_logQueue[0];
+      for(int i = 0; i < cnt - 1; i++)
+         m_logQueue[i] = m_logQueue[i + 1];
+      ArrayResize(m_logQueue, cnt - 1);
       return true;
      }
 
@@ -1107,40 +1497,74 @@ public:
          m_dailyCycleTradesFilledToday = 0;
         }
 
-      StepTracker(m_buySetup,  mtf, swings, msnr, ict, qtState, biasState, prof, currentSpreadPrice, isNewsBlocked, newsReason);
-      StepTracker(m_sellSetup, mtf, swings, msnr, ict, qtState, biasState, prof, currentSpreadPrice, isNewsBlocked, newsReason);
+      // 1. Step Pure HTF Trackers (v1.12 Engine)
+      StepHTFTracker(m_buyHtf,   mtf, swings, msnr, ict, qtState, biasState, prof, currentSpreadPrice, isNewsBlocked, newsReason);
+      StepHTFTracker(m_sellHtf,  mtf, swings, msnr, ict, qtState, biasState, prof, currentSpreadPrice, isNewsBlocked, newsReason);
+
+      // 2. Step Daily Cycle Trackers (AMDX / XAMD Engine)
+      if(m_cfg.enableDailyAmdxCycle)
+        {
+         StepCycleTracker(m_buyCycle,  mtf, swings, msnr, ict, qtState, biasState, prof, currentSpreadPrice, isNewsBlocked, newsReason);
+         StepCycleTracker(m_sellCycle, mtf, swings, msnr, ict, qtState, biasState, prof, currentSpreadPrice, isNewsBlocked, newsReason);
+        }
      }
 
    //--- Transition helpers called by Execution Engine (M8)
    void              NotifyOrderPlaced(const ENUM_BIAS_DIR dir, const ulong ticket)
      {
       if(dir == BIAS_BULL)
-         m_buySetup.orderTicket = ticket;
+        {
+         if(m_buyHtf.state == SETUP_S4_ARMED)
+            m_buyHtf.orderTicket = ticket;
+         else if(m_buyCycle.state == SETUP_S4_ARMED)
+            m_buyCycle.orderTicket = ticket;
+        }
       else if(dir == BIAS_BEAR)
-         m_sellSetup.orderTicket = ticket;
+        {
+         if(m_sellHtf.state == SETUP_S4_ARMED)
+            m_sellHtf.orderTicket = ticket;
+         else if(m_sellCycle.state == SETUP_S4_ARMED)
+            m_sellCycle.orderTicket = ticket;
+        }
      }
 
    void              NotifyTradeFilled(const ENUM_BIAS_DIR dir, const ulong ticket, CMSNREngine &msnr)
      {
       if(dir == BIAS_BULL)
         {
-         m_buySetup.state       = SETUP_S5_IN_TRADE;
-         m_buySetup.orderTicket = ticket;
-         msnr.MarkLevelUsed(m_buySetup.anchorPOI.id);
-         if(m_buySetup.hasRefinedPOI)
-            msnr.MarkLevelUsed(m_buySetup.refinedPOI.id);
-         if(m_buySetup.anchorPOI.tfIdx >= TF_IDX_M15)
+         if(m_buyHtf.orderTicket == ticket || m_buyHtf.state == SETUP_S4_ARMED)
+           {
+            m_buyHtf.state       = SETUP_S5_IN_TRADE;
+            m_buyHtf.orderTicket = ticket;
+            msnr.MarkLevelUsed(m_buyHtf.anchorPOI.id);
+            if(m_buyHtf.hasRefinedPOI)
+               msnr.MarkLevelUsed(m_buyHtf.refinedPOI.id);
+           }
+         if(m_buyCycle.orderTicket == ticket || m_buyCycle.state == SETUP_S4_ARMED)
+           {
+            m_buyCycle.state       = SETUP_S5_IN_TRADE;
+            m_buyCycle.orderTicket = ticket;
+            msnr.MarkLevelUsed(m_buyCycle.anchorPOI.id);
             m_dailyCycleTradesFilledToday++;
+           }
         }
       else if(dir == BIAS_BEAR)
         {
-         m_sellSetup.state       = SETUP_S5_IN_TRADE;
-         m_sellSetup.orderTicket = ticket;
-         msnr.MarkLevelUsed(m_sellSetup.anchorPOI.id);
-         if(m_sellSetup.hasRefinedPOI)
-            msnr.MarkLevelUsed(m_sellSetup.refinedPOI.id);
-         if(m_sellSetup.anchorPOI.tfIdx >= TF_IDX_M15)
+         if(m_sellHtf.orderTicket == ticket || m_sellHtf.state == SETUP_S4_ARMED)
+           {
+            m_sellHtf.state       = SETUP_S5_IN_TRADE;
+            m_sellHtf.orderTicket = ticket;
+            msnr.MarkLevelUsed(m_sellHtf.anchorPOI.id);
+            if(m_sellHtf.hasRefinedPOI)
+               msnr.MarkLevelUsed(m_sellHtf.refinedPOI.id);
+           }
+         if(m_sellCycle.orderTicket == ticket || m_sellCycle.state == SETUP_S4_ARMED)
+           {
+            m_sellCycle.state       = SETUP_S5_IN_TRADE;
+            m_sellCycle.orderTicket = ticket;
+            msnr.MarkLevelUsed(m_sellCycle.anchorPOI.id);
             m_dailyCycleTradesFilledToday++;
+           }
         }
      }
 
@@ -1148,13 +1572,29 @@ public:
      {
       if(dir == BIAS_BULL)
         {
-         m_buySetup.statusNote = reason;
-         m_buySetup.Reset(BIAS_BULL);
+         if(m_buyHtf.orderTicket > 0 || m_buyHtf.state >= SETUP_S4_ARMED)
+           {
+            m_buyHtf.statusNote = reason;
+            m_buyHtf.Reset(BIAS_BULL);
+           }
+         if(m_buyCycle.orderTicket > 0 || m_buyCycle.state >= SETUP_S4_ARMED)
+           {
+            m_buyCycle.statusNote = reason;
+            m_buyCycle.Reset(BIAS_BULL);
+           }
         }
       else if(dir == BIAS_BEAR)
         {
-         m_sellSetup.statusNote = reason;
-         m_sellSetup.Reset(BIAS_BEAR);
+         if(m_sellHtf.orderTicket > 0 || m_sellHtf.state >= SETUP_S4_ARMED)
+           {
+            m_sellHtf.statusNote = reason;
+            m_sellHtf.Reset(BIAS_BEAR);
+           }
+         if(m_sellCycle.orderTicket > 0 || m_sellCycle.state >= SETUP_S4_ARMED)
+           {
+            m_sellCycle.statusNote = reason;
+            m_sellCycle.Reset(BIAS_BEAR);
+           }
         }
      }
   };

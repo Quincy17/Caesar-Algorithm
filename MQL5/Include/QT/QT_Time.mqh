@@ -45,6 +45,8 @@ struct SQTTimeConfig
    bool                allowWednesday;      // Default true  (Wed Q3)
    bool                allowThursday;       // Default true  (Thu Q4)
    bool                allowFriday;         // Default false (Fri Q0 out of cycle)
+   bool                allowMondayCycleD;   // v1.21: Allow Monday for Daily Cycle Phase D entries only (Default true)
+   bool                allowFridayCycleD;   // v1.21: Allow Friday for Daily Cycle Phase D entries only (Default true)
 
    // Session permissions (Daily cycle)
    bool                allowAsia;           // 18:00-00:00 NY (Q1) - Default false (true for Swing)
@@ -73,6 +75,8 @@ struct SQTTimeConfig
       allowWednesday       = true;
       allowThursday        = true;
       allowFriday          = false;
+      allowMondayCycleD    = true;
+      allowFridayCycleD    = true;
 
       allowAsia            = false;
       allowLondon          = true;
@@ -673,6 +677,15 @@ public:
                                 outState.isSessionAllowed &&
                                 outState.isQ90Allowed &&
                                 !outState.isFridayCutoffPassed);
+
+      // v1.21: Mon / Fri open for Daily Cycle Phase D entries only (HTF tracker still uses isTimeAllowed)
+      outState.isCycleOnlyDay = (!outState.isDayAllowed &&
+                                 ((outState.dayeDayOfWeek == 1 && m_cfg.allowMondayCycleD) ||
+                                  (outState.dayeDayOfWeek == 5 && m_cfg.allowFridayCycleD)));
+      outState.isCycleTimeAllowed = ((outState.isDayAllowed || outState.isCycleOnlyDay) &&
+                                     outState.isSessionAllowed &&
+                                     outState.isQ90Allowed &&
+                                     !outState.isFridayCutoffPassed);
      }
 
    //--- Update internal state for serverTime and return copy

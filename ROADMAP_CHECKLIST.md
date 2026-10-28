@@ -289,7 +289,15 @@ Tujuan: Menguji performa dan validitas aturan secara statistik di Strategy Teste
     - **Naratif Likuiditas:** Label `ERL→IRL`, `IRL→ERL`, `ERL→ERL` disimpan di setup & `dolLabel`.
     - **Target Harian:** TP = `Swing High Fase A` (BUY) / `Swing Low Fase A` (SELL) bila jarak ≥ `max(SL × minRR, 115 pips)`; jika tidak, fallback ke HTF DOL / `RUNNER_300P`. Lot paten (`0.05`/`$5k`), SL `45–75 pips`, BE `+65 pips`, dan Partial 50% `+100 pips` tidak berubah.
     - **Input EA baru:** `InpEnableDailyAmdxCycle = true` (versi EA `1.20`).
-  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-implementasi `v1.20` (target frekuensi trade jauh di atas 27 trade / 10 bulan).
+  - [x] **Backtest Iterasi 4 (`report-4`, `v1.20`) & Arsitektur Dual-Tracker Decoupled (`v1.21`):**
+    - **Temuan Kritis `report-4`:** Setup siklus harian LTF menimpa slot tracker HTF sehingga membatalkan 4 trade pemenang besar HTF v1.12 (kehilangan `+$914.77`), Fase M berisiko tinggi rugi `-4.72R` terutama saat fallback ke runner 300p pada range Fase A sempit, sedangkan Fase D profit `+3.77R` (`+$568.44`) dan naratif `IRL→ERL` profit `+2.50R`.
+    - **Tracker Terpisah (Decoupled Dual-Trackers):** `m_buyHtf` / `m_sellHtf` (murni HTF W1/D1/H4/H1, mempertahankan 100% perilaku v1.12 yang menghasilkan `+$959.98`) dan `m_buyCycle` / `m_sellCycle` (Daily Cycle AMDX/XAMD). Slot HTF tidak lagi dapat tergeser oleh setup siklus harian.
+    - **Pengetatan Fase M Ekstrem:** Wajib berada di blok `Q3` 90 menit (`q90 == QT_Q3`), wajib searah struktur `biasD1`, dan range Fase A wajib `≥ 115 pips` ($11.50). Target wajib menyentuh Swing High/Low Fase A; dilarang keras fallback ke `RUNNER_300P`.
+    - **Fase D & Naratif `IRL→ERL`:** Menjadi pilar utama entry siklus harian pada zona Flip/QM M15 di area Diskon/Premium.
+    - **Eliminasi Anchor Standalone M5:** POI `M5` dihapus dari anchor siklus harian, hanya `M15` yang digunakan sebagai POI anchor harian.
+    - **Buka Hari Senin & Jumat Khusus Fase D:** Parameter `InpAllowMondayCycleD = true` dan `InpAllowFridayCycleD = true` membuka hari Senin dan Jumat secara eksklusif hanya untuk entry Fase D (pullback rendah risiko), sementara tracker HTF tetap menjaga disiplin Selasa–Kamis.
+    - **Queue Buffer Log Setup:** Seluruh evaluasi setup (HTF maupun Cycle) di-drain menggunakan `while(PopLastLogEvent)` sehingga 0 setup terbuang dari `QT_Setups_Log.csv`.
+  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-implementasi `v1.21`.
   - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-kalibrasi `v1.12`.
   - [ ] Pemisahan periode data menjadi **In-Sample (IS)** dan **Out-of-Sample (OOS)**.
 - [x] **Script Analisis Statistik & Validasi Asumsi QT (`AnalyzeBacktestCSV.mq5`)**

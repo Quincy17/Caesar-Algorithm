@@ -1,4 +1,4 @@
-//+------------------------------------------------------------------+
+﻿//+------------------------------------------------------------------+
 //| Defines.mqh                                                      |
 //| Shared Constants, Enums, and Data Structures (QT-MSNR-ICT EA)    |
 //| Place in: MQL5/Include/QT/Defines.mqh                            |
@@ -6,7 +6,7 @@
 #ifndef QT_DEFINES_MQH
 #define QT_DEFINES_MQH
 
-#define QT_EA_VERSION         "1.20"
+#define QT_EA_VERSION         "1.21"
 #define QT_TARGET_SYMBOL      "XAUUSD"
 #define QT_MTF_COUNT          6
 
@@ -220,6 +220,8 @@ struct QTState
    bool            isQ90Allowed;        // True if current 90m quarter is enabled
    bool            isFridayCutoffPassed;// True if Friday >= FridayCloseNY (15:00 NY)
    bool            isTimeAllowed;       // Master time filter flag (Day && Session && Q90 && !FridayCutoff)
+   bool            isCycleOnlyDay;      // v1.21: Mon/Fri enabled only for Daily Cycle Phase D entries
+   bool            isCycleTimeAllowed;  // v1.21: Time filter for Daily Cycle tracker ((Day || CycleOnlyDay) && Session && Q90 && !FridayCutoff)
 
    void Reset()
      {
@@ -252,6 +254,8 @@ struct QTState
       isQ90Allowed         = false;
       isFridayCutoffPassed = false;
       isTimeAllowed        = false;
+      isCycleOnlyDay       = false;
+      isCycleTimeAllowed   = false;
      }
   };
 

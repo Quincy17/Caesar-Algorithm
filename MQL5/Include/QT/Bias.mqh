@@ -114,6 +114,8 @@ struct SBiasState
    // Overall Trade Direction permitted by active Trade Profile Gate
    bool             allowBuy;
    bool             allowSell;
+   bool             allowBuyCycle;       // v1.21: Daily AMDX/XAMD cycle-only gate (separate from HTF gate)
+   bool             allowSellCycle;      // v1.21: Daily AMDX/XAMD cycle-only gate (separate from HTF gate)
    ENUM_BIAS_DIR    storylineDir;        // Dominant direction (BIAS_BULL, BIAS_BEAR, or BIAS_NEUTRAL)
 
    // Daily AMDX / XAMD Cycle & ERL <-> IRL Narrative State
@@ -144,6 +146,8 @@ struct SBiasState
       isAboveTrueWeekOpen = false;
       allowBuy            = false;
       allowSell           = false;
+      allowBuyCycle       = false;
+      allowSellCycle      = false;
       storylineDir        = BIAS_NEUTRAL;
       dailyCycle.Reset();
       bullDOL.Reset();
@@ -784,21 +788,20 @@ public:
       if(rejD1 == BIAS_BEAR || (rejH4 == BIAS_BEAR && m_state.biasD1 == BIAS_BEAR))
          m_state.allowSell = true;
 
-      // Daily AMDX / XAMD Cycle Rule: When Phase A High/Low has been swept in Phase M or Phase D,
-      // unlock directional setup if supported by at least one HTF structure (D1 or H4) or HTF True Open Discount/Premium
+      // Daily AMDX / XAMD Cycle Rule (v1.21): When Phase A High/Low has been swept in Phase M or Phase D,
+      // unlock a SEPARATE cycle-only gate (allowBuyCycle / allowSellCycle) if supported by D1 or H4 structure.
+      // The HTF gate (allowBuy / allowSell) is no longer modified, so pure HTF setups keep v1.12 behaviour.
       if(m_state.dailyCycle.isActive)
         {
          if(m_state.dailyCycle.manipulationDir == BIAS_BULL &&
-            (m_state.biasD1 == BIAS_BULL || m_state.biasH4 == BIAS_BULL ||
-             (m_state.isBelowTrueDayOpen && m_state.isBelowTrueWeekOpen)))
+            (m_state.biasD1 == BIAS_BULL || m_state.biasH4 == BIAS_BULL))
            {
-            m_state.allowBuy = true;
+            m_state.allowBuyCycle = true;
            }
          if(m_state.dailyCycle.manipulationDir == BIAS_BEAR &&
-            (m_state.biasD1 == BIAS_BEAR || m_state.biasH4 == BIAS_BEAR ||
-             (m_state.isAboveTrueDayOpen && m_state.isAboveTrueWeekOpen)))
+            (m_state.biasD1 == BIAS_BEAR || m_state.biasH4 == BIAS_BEAR))
            {
-            m_state.allowSell = true;
+            m_state.allowSellCycle = true;
            }
         }
 

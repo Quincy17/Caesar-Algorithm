@@ -18,7 +18,7 @@
 //|  - M12 Friday Flat       : Mandatory Friday 15:00 NY Flat        |
 //+------------------------------------------------------------------+
 #property copyright "Caesar Algorithm - QT-MSNR-ICT"
-#property version   "1.20"
+#property version   "1.21"
 #property strict
 
 #include "../Include/QT/Defines.mqh"
@@ -54,10 +54,12 @@ input int                 InpModeAServerToNY    = -7;                         //
 input int                 InpModeBServerGMT     = 0;                          // Mode B: Broker Standard GMT Offset
 input bool                InpOverrideProfileTime= false;                      // Override Profile Time Filter with Manual Toggles
 input bool                InpAllowMonday        = false;                      // Manual: Allow Monday (Q1 Accumulation)
+input bool                InpAllowMondayCycleD  = true;                       // Allow Monday for Daily Cycle Phase D entries (v1.21)
 input bool                InpAllowTuesday       = true;                       // Manual: Allow Tuesday (Q2)
 input bool                InpAllowWednesday     = true;                       // Manual: Allow Wednesday (Q3)
 input bool                InpAllowThursday      = true;                       // Manual: Allow Thursday (Q4)
 input bool                InpAllowFriday        = false;                      // Manual: Allow Friday (Q0 Out of Cycle)
+input bool                InpAllowFridayCycleD  = true;                       // Allow Friday for Daily Cycle Phase D entries (v1.21)
 input bool                InpAllowAsia          = false;                      // Manual: Allow Asia Session (18-24 NY Q1)
 input bool                InpAllowLondon        = true;                       // Manual: Allow London Session (00-06 NY Q2)
 input bool                InpAllowNyAm          = true;                       // Manual: Allow NY AM Session (06-12 NY Q3)
@@ -203,6 +205,8 @@ int OnInit()
 
    tcfg.fridayCloseHourNY = InpFridayCloseHourNY;
    tcfg.fridayCloseMinNY  = InpFridayCloseMinNY;
+   tcfg.allowMondayCycleD = InpAllowMondayCycleD;
+   tcfg.allowFridayCycleD = InpAllowFridayCycleD;
    g_timeEngine.Init(_Symbol, tcfg);
 
    // Verify Broker D1 Open = 17:00 NY
@@ -393,7 +397,7 @@ void OnTick()
      }
 
    // 3b. Gate: Cancel any pending limit orders if QT trading session/90m time window has ended
-   if(!g_qtState.isTimeAllowed && g_exec.CountPendingOrders() > 0)
+   if(!g_qtState.isTimeAllowed && !g_qtState.isCycleTimeAllowed && g_exec.CountPendingOrders() > 0)
      {
       g_exec.CancelPendingOrders(BIAS_NEUTRAL, "TIME_WINDOW_ENDED",
                                  g_logger, g_qtState, g_profileSpec.profile);
@@ -420,9 +424,9 @@ void OnTick()
       g_biasState = g_bias.Update(g_mtf, g_swings, g_msnr, g_ict, g_qtState, g_profileSpec);
 
       // Cancel pending order if Gate TF Bias flipped against an armed setup (PRD 4.10)
-      if(!g_biasState.allowBuy && g_exec.CountPendingOrders(BIAS_BULL) > 0)
+      if(!g_biasState.allowBuy && !g_biasState.allowBuyCycle && g_exec.CountPendingOrders(BIAS_BULL) > 0)
          g_exec.CancelPendingOrders(BIAS_BULL, "BIAS_GATE_FLIPPED_AGAINST_BUY", g_logger, g_qtState, g_profileSpec.profile);
-      if(!g_biasState.allowSell && g_exec.CountPendingOrders(BIAS_BEAR) > 0)
+      if(!g_biasState.allowSell && !g_biasState.allowSellCycle && g_exec.CountPendingOrders(BIAS_BEAR) > 0)
          g_exec.CancelPendingOrders(BIAS_BEAR, "BIAS_GATE_FLIPPED_AGAINST_SELL", g_logger, g_qtState, g_profileSpec.profile);
 
       // Step M7 Setup State Machine on new M5 closed bar
@@ -432,9 +436,9 @@ void OnTick()
                         g_qtState, g_biasState, g_profileSpec,
                         spreadPrice, isNewsBlocked, newsWhy);
 
-         // Flush any newly evaluated / rejected setup to CSV journal
+         // Flush all newly evaluated / rejected setups to CSV journal
          SSetupTracker evalSetup;
-         if(g_setup.PopLastLogEvent(evalSetup))
+         while(g_setup.PopLastLogEvent(evalSetup))
             g_logger.LogSetup(evalSetup, g_qtState, g_biasState, g_profileSpec);
 
          // Immediately cancel broker pending limit orders if their setup was invalidated or expired
@@ -449,7 +453,7 @@ void OnTick()
    string riskBlockWhy = "OK";
    bool canOpenNewTrade = g_risk.UpdateAndCheckCanTrade(g_timeEngine, g_qtState, riskBlockWhy);
 
-   if(canOpenNewTrade && !isNewsBlocked && g_qtState.isTimeAllowed)
+   if(canOpenNewTrade && !isNewsBlocked && (g_qtState.isTimeAllowed || g_qtState.isCycleTimeAllowed))
      {
       double atrM5 = g_mtf.GetATR(TF_IDX_M5);
       double atrH1 = g_mtf.GetATR(TF_IDX_H1);
