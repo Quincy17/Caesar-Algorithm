@@ -18,7 +18,7 @@
 //|  - M12 Friday Flat       : Mandatory Friday 15:00 NY Flat        |
 //+------------------------------------------------------------------+
 #property copyright "Caesar Algorithm - QT-MSNR-ICT"
-#property version   "1.10"
+#property version   "1.12"
 #property strict
 
 #include "../Include/QT/Defines.mqh"
@@ -109,9 +109,10 @@ input double              InpMaxWeeklyLossPct   = 5.00;                       //
 input int                 InpMaxTradesPerDay    = 2;                          // Max Trades per Daye Trading Day
 input int                 InpMaxConsecLosses    = 3;                          // Pause Until Next Day after N Consecutive Losses
 input int                 InpMaxSpreadPoints    = 50;                         // Max Allowed Spread (Points)
-input bool                InpUseBreakEven1R     = true;                       // Move SL to Break-Even at TP1 (100 Pips)
+input bool                InpUseBreakEven1R     = true;                       // Move SL to Break-Even (Stage-1 Protection)
+input double              InpBreakEvenPips      = 65.0;                       // Stage-1 Break-Even Trigger Pips (65 pips = $6.50)
 input double              InpBeBufferPoints     = 5.0;                        // Break-Even Buffer (Points)
-input bool                InpUsePartialTP1      = true;                       // Close 50% at Running 100 Pips (TP1)
+input bool                InpUsePartialTP1      = true;                       // Stage-2 Close 50% at Running 100 Pips (TP1)
 input bool                InpUseTimeStop        = true;                       // Enforce Profile Duration Time Stop
 input bool                InpFridayNoNewEntry   = true;                       // Block New Entries on Friday (Q0)
 input int                 InpFridayCloseHourNY  = 15;                         // Friday Forced Flat Hour (NY Time, default 15)
@@ -231,10 +232,14 @@ int OnInit()
    mcfg.maxQMBodyBreak       = InpMaxQMBodyBreak;
    for(int i = 0; i < QT_MTF_COUNT; i++)
       mcfg.enableTF[i] = g_profileSpec.allowPOITF[i];
-   // Ensure W1/D1/H4 are always enabled for HTF Bias & Roadblock detection
-   mcfg.enableTF[TF_IDX_W1] = true;
-   mcfg.enableTF[TF_IDX_D1] = true;
-   mcfg.enableTF[TF_IDX_H4] = true;
+   // Ensure W1/D1/H4/H1 are always enabled for HTF Bias, Anchor POI & Roadblock detection,
+   // and M15/M5 are always enabled in MSNR Engine for nested LTF POI refinement inside HTF Anchor Zones
+   mcfg.enableTF[TF_IDX_W1]  = true;
+   mcfg.enableTF[TF_IDX_D1]  = true;
+   mcfg.enableTF[TF_IDX_H4]  = true;
+   mcfg.enableTF[TF_IDX_H1]  = true;
+   mcfg.enableTF[TF_IDX_M15] = true;
+   mcfg.enableTF[TF_IDX_M5]  = true;
    g_msnr.Init(mcfg);
 
    // 6. Configure M5 ICT Engine
@@ -283,6 +288,7 @@ int OnInit()
    ecfg.SetDefaults();
    ecfg.magicNumber           = g_effectiveMagic;
    ecfg.useBreakEvenAt1R      = InpUseBreakEven1R;
+   ecfg.breakEvenPips         = InpBreakEvenPips;
    ecfg.breakEvenBufferPoints = InpBeBufferPoints;
    ecfg.usePartialCloseTP1    = InpUsePartialTP1;
    ecfg.partialTp1Pips        = InpPartialTp1Pips;

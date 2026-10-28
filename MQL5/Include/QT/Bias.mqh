@@ -415,7 +415,8 @@ public:
 
       if(rejW1 != BIAS_NEUTRAL) m_state.structW1 = rejW1;
       if(rejD1 != BIAS_NEUTRAL) m_state.structD1 = rejD1;
-      if(rejH4 != BIAS_NEUTRAL) m_state.structH4 = rejH4;
+      if(rejH4 != BIAS_NEUTRAL && (m_state.structD1 == rejH4 || rejD1 == rejH4))
+         m_state.structH4 = rejH4;
 
       // 2. True Open Context (True Day Open 00:00 NY & True Week Open Mon 18:00 NY)
       if(qtState.trueOpens.dayOpen.valid && qtState.trueOpens.dayOpen.price > 0.0)
@@ -470,11 +471,11 @@ public:
       m_state.allowBuy  = profileSpec.CheckBiasGate(BIAS_BULL, m_state.biasW1, m_state.biasD1, m_state.biasH4);
       m_state.allowSell = profileSpec.CheckBiasGate(BIAS_BEAR, m_state.biasW1, m_state.biasD1, m_state.biasH4);
 
-      // MSNR Storyline Reversal Rule: When price taps a Fresh D1 or H4 MSNR Support/Resistance,
-      // allow reversal setups in that HTF POI's direction (LTF Sweep + MSS + FVG will confirm the trigger)
-      if((rejD1 == BIAS_BULL || rejH4 == BIAS_BULL) && rejD1 != BIAS_BEAR)
+      // MSNR Storyline Reversal Rule: When price taps a Fresh D1 MSNR Support/Resistance (or H4 aligned with D1),
+      // allow setups in that HTF POI's direction (LTF Sweep + MSS + FVG will confirm the trigger)
+      if(rejD1 == BIAS_BULL || (rejH4 == BIAS_BULL && m_state.biasD1 == BIAS_BULL))
          m_state.allowBuy = true;
-      if((rejD1 == BIAS_BEAR || rejH4 == BIAS_BEAR) && rejD1 != BIAS_BULL)
+      if(rejD1 == BIAS_BEAR || (rejH4 == BIAS_BEAR && m_state.biasD1 == BIAS_BEAR))
          m_state.allowSell = true;
 
       if(m_state.allowBuy && !m_state.allowSell)

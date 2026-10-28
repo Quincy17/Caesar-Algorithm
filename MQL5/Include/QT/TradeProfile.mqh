@@ -84,15 +84,16 @@ struct STradeProfileSpec
         }
       else if(prof == PROFILE_INTRADAY)
         {
-         // Gate: D1 & H4 | Score: W1 | POI: H4, H1, M15, M5 | Trigger: M15/M5 | Entry: M5 | RR: 2.0
+         // Gate: D1 & H4 | Score: W1 | Anchor POI: D1, H4, H1 (Refined on M15/M5) | Trigger: M15/M5 | Entry: M5 | RR: 2.0
          isGateTF[TF_IDX_D1]  = enableD1;
          isGateTF[TF_IDX_H4]  = enableH4;
          isScoreTF[TF_IDX_W1] = enableW1;
 
+         allowPOITF[TF_IDX_D1]  = true;
          allowPOITF[TF_IDX_H4]  = true;
          allowPOITF[TF_IDX_H1]  = true;
-         allowPOITF[TF_IDX_M15] = true; // Added for precision entry & refinement
-         allowPOITF[TF_IDX_M5]  = true; // Added for precision entry & refinement
+         allowPOITF[TF_IDX_M15] = false; // M15 & M5 used strictly for nested refinement inside HTF Anchor POIs
+         allowPOITF[TF_IDX_M5]  = false;
 
          triggerTfIdx           = TF_IDX_M15;
          secondaryTriggerTfIdx  = TF_IDX_M5;
@@ -104,7 +105,7 @@ struct STradeProfileSpec
         }
       else // PROFILE_SWING
         {
-         // Gate: W1 & D1 | Score: H4 | POI: W1, D1, H4, H1, M15 | Trigger: H1 | Entry: M15 | RR: 3.0
+         // Gate: W1 & D1 | Score: H4 | Anchor POI: W1, D1, H4, H1 | Trigger: H1 | Entry: M15 | RR: 3.0
          isGateTF[TF_IDX_W1]  = enableW1;
          isGateTF[TF_IDX_D1]  = enableD1;
          isScoreTF[TF_IDX_H4] = enableH4;
@@ -113,7 +114,7 @@ struct STradeProfileSpec
          allowPOITF[TF_IDX_D1]  = true;
          allowPOITF[TF_IDX_H4]  = true;
          allowPOITF[TF_IDX_H1]  = true;
-         allowPOITF[TF_IDX_M15] = true;
+         allowPOITF[TF_IDX_M15] = false;
 
          triggerTfIdx           = TF_IDX_H1;
          secondaryTriggerTfIdx  = TF_IDX_M15;

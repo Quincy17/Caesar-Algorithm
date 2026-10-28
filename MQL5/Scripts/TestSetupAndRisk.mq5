@@ -38,12 +38,13 @@ void OnStart()
    STradeProfileSpec profIntraday;
    profIntraday.Configure(PROFILE_INTRADAY, BIAS_GATE_STRICT, true, true, true);
 
-   // Intraday Gate = D1 & H4; Score = W1
-   Check(profIntraday.allowPOITF[TF_IDX_H4]  &&
-         profIntraday.allowPOITF[TF_IDX_H1]  &&
-         profIntraday.allowPOITF[TF_IDX_M15] &&
-         profIntraday.allowPOITF[TF_IDX_M5],
-         "Intraday profile allows POI on H4, H1, M15, and M5 for precision entry");
+   // Intraday Gate = D1 & H4; Score = W1; Primary Anchor POI = D1, H4, H1 (M15/M5 used strictly for nested refinement)
+   Check(profIntraday.allowPOITF[TF_IDX_D1]   &&
+         profIntraday.allowPOITF[TF_IDX_H4]   &&
+         profIntraday.allowPOITF[TF_IDX_H1]   &&
+         !profIntraday.allowPOITF[TF_IDX_M15] &&
+         !profIntraday.allowPOITF[TF_IDX_M5],
+         "Intraday profile enforces HTF Anchor POI (D1, H4, H1) while reserving M15/M5 for nested refinement");
 
    Check(profIntraday.CheckBiasGate(BIAS_BULL, BIAS_BEAR, BIAS_BULL, BIAS_BULL),
          "Intraday STRICT Gate passes BUY when D1=BULL & H4=BULL (even if W1=BEAR)");

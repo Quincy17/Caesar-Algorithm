@@ -275,7 +275,14 @@ Tujuan: Menguji performa dan validitas aturan secara statistik di Strategy Teste
     - Wajibkan **Partial Close 50% (`PARTIAL_TP1`) + Break-Even secara serentak tepat saat running `100 pips` (`$10.00` di XAUUSD)** di `Setup.mqh` & `Exec.mqh`.
     - Kalibrasi jarak SL manual XAUUSD (`45–75 pips`, target default `60 pips` / `$6.00`) dan Full TP Runner (`300 pips` / `$30.00` atau HTF DOL) untuk mengeliminasi *micro-SL* (`< 15 pips`) maupun SL terlalu lebar.
     - Filter *standalone* POI `M15`/`M5` agar hanya menerima zona *Flip/QM* (`RBS`, `SBR`, `QM_Bull`, `QM_Bear`) jika tanpa Anchor HTF (`H4`/`H1`), serta auto-cancel *orphan pending limit order* saat jendela waktu sesi berakhir atau setup batal.
-  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-kalibrasi `v1.11`.
+  - [x] **Backtest Iterasi 2 (`report-2`, `v1.11`) & Kalibrasi Top-Down HTF POI (`v1.12`):**
+    - Verifikasi mekanis `report-2`: Ukuran lot `0.25 lot` (`$25k` equity), `0` orphan limit order, `0` pelanggaran waktu sesi/hari, dan 100% disiplin Partial Close 50% pada `+100 pips` (`H4` Anchor POI mencetak `50.0% WR`, `+$885.23`, `+5.59R`, Profit Factor `2.04` di In-Sample & Forward Test).
+    - **Kunci Anchor POI Intraday Khusus HTF (`D1`, `H4`, `H1`) (`TradeProfile.mqh` & `QT_MSNR_EA.mq5`):** Nonaktifkan *standalone* `M15` dan `M5` sebagai Anchor POI utama (`allowPOITF[M15]=false`, `allowPOITF[M5]=false`) yang sebelumnya menyumbang 67% frekuensi trade dan rugi `-$2,591.07`; gunakan `M15` & `M5` murni untuk *nested refinement* (`FindNestedRefinedPOI`) di dalam zona HTF `D1`/`H4`/`H1`.
+    - **Proteksi Trade 2-Tahap Berdasarkan Grafik MFE/MAE MT5 (`Exec.mqh`):**
+      - **Tahap 1 (`+65 Pips` / `$6.50`):** Geser `SL` ke *Break-Even* (`entryPrice +/- buffer`) saat *running profit* mencapai `+65 pips` (`InpBreakEvenPips = 65.0`) untuk menyelamatkan posisi yang sudah lari `+67 s/d +95 pips` (`> 1.1R`) agar tidak berbalik menjadi `-1R` (`SL_HIT`).
+      - **Tahap 2 (`+100 Pips` / `$10.00`):** Eksekusi *Mandatory Partial Close 50%* (`PARTIAL_TP1`) saat *running profit* mencapai `+100 pips` (`InpPartialTp1Pips = 100.0`), menyisakan 50% *runner* bebas risiko menuju `+300 pips` (`$30.00`) / HTF DOL.
+    - **Perbaikan Filter Reversal Bias & Siklus Hidup Zona `RBS`/`SBR` (`Bias.mqh` & `MSNR_Levels.mqh`):** Cegah `rejH4` membuka posisi *counter-trend* melawan arah `biasD1`, serta wajibkan minimal 1 candle tutup di luar zona (`hasLeftZone`) setelah *breakout* sebelum *retest* menandai zona `RBS`/`SBR` sebagai `USED`.
+  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-kalibrasi `v1.12`.
   - [ ] Pemisahan periode data menjadi **In-Sample (IS)** dan **Out-of-Sample (OOS)**.
 - [x] **Script Analisis Statistik & Validasi Asumsi QT (`AnalyzeBacktestCSV.mq5`)**
   - [x] Evaluasi metrik utama: Jumlah trade (target $\ge 100$), *Expectancy* (dalam R), *Profit Factor*, *Max Drawdown*, *Win Rate*, dan rata-rata RR.

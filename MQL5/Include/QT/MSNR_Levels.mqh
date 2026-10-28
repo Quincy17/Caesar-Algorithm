@@ -404,7 +404,9 @@ public:
                                                      (long)sw.pivotTime);
 
             // Track RBS/SBR lifecycle from bar after breakout (breakArrIdx - 1 down to 0)
+            // Require at least 1 closed bar to clear the zone (hasLeftZone) before a retest marks it USED
             bool invalidatedByRebreak = false;
+            bool hasLeftZone          = false;
             for(int j = breakArrIdx - 1; j >= 0; j--)
               {
                double hi = rates[j].high;
@@ -419,8 +421,13 @@ public:
                      invalidatedByRebreak = true;
                      break;
                     }
-                  // First wick touch of RBS support from above
-                  if(lo <= flipLvl.zoneHigh && flipLvl.status == POI_STATUS_FRESH)
+                  if(lo > flipLvl.zoneHigh)
+                    {
+                     hasLeftZone = true;
+                     continue;
+                    }
+                  // First true pullback touch of RBS support from above after price has left the zone
+                  if(hasLeftZone && lo <= flipLvl.zoneHigh && flipLvl.status == POI_STATUS_FRESH)
                     {
                      flipLvl.status           = POI_STATUS_USED;
                      flipLvl.firstTouchTime   = rates[j].time;
@@ -435,8 +442,13 @@ public:
                      invalidatedByRebreak = true;
                      break;
                     }
-                  // First wick touch of SBR resistance from below
-                  if(hi >= flipLvl.zoneLow && flipLvl.status == POI_STATUS_FRESH)
+                  if(hi < flipLvl.zoneLow)
+                    {
+                     hasLeftZone = true;
+                     continue;
+                    }
+                  // First true pullback touch of SBR resistance from below after price has left the zone
+                  if(hasLeftZone && hi >= flipLvl.zoneLow && flipLvl.status == POI_STATUS_FRESH)
                     {
                      flipLvl.status           = POI_STATUS_USED;
                      flipLvl.firstTouchTime   = rates[j].time;

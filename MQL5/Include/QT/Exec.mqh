@@ -282,10 +282,11 @@ struct SExecConfig
    int    slippagePoints;
    int    maxRetries;
    bool   useBreakEvenAt1R;
+   double breakEvenPips;          // Default 65.0 pips ($6.50 on XAUUSD) for Stage-1 Break-Even protection
    double breakEvenBufferPoints;
    bool   usePartialCloseTP1;
    double partialCloseRatio;      // Default 0.50 (50%)
-   double partialTp1Pips;         // Default 100.0 pips ($10.00 on XAUUSD) for Partial TP1 + Break-Even
+   double partialTp1Pips;         // Default 100.0 pips ($10.00 on XAUUSD) for Stage-2 50% Partial Close (TP1)
    bool   useTimeStop;            // Enforce profile duration limit
    bool   closeOrBeBeforeNews;    // Optional: move to BE before news window (default false)
 
@@ -295,6 +296,7 @@ struct SExecConfig
       slippagePoints        = 20;
       maxRetries            = 3;
       useBreakEvenAt1R      = true;
+      breakEvenPips         = 65.0;
       breakEvenBufferPoints = 5.0;
       usePartialCloseTP1    = true;
       partialCloseRatio     = 0.50;
@@ -1347,59 +1349,59 @@ public:
               }
            }
 
-         // B & C) Mandatory Partial Close (50%) + Simultaneous Break-Even when Running 100 Pips (TP1)!
+         // B) Stage-1 Trade Protection: Move SL to Break-Even at +65 Pips (1R protection before TP1)
+         double beTargetPips = (m_cfg.breakEvenPips > 0.0 ? m_cfg.breakEvenPips : 65.0);
+         double beTargetDist = QTPipsToPrice(m_symbol, beTargetPips);
          double tp1TargetDist = QTPipsToPrice(m_symbol, (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
          bool tp1Reached = (profitDist >= tp1TargetDist - 1e-5) ||
                            (m_managed[m].tp1Price > 0.0 &&
                             (dir == BIAS_BULL ? (curPrice >= m_managed[m].tp1Price)
                                               : (curPrice <= m_managed[m].tp1Price)));
+         bool beReached  = (profitDist >= beTargetDist - 1e-5) || tp1Reached;
 
-         if(tp1Reached)
+         // C) Stage-2 Mandatory Partial Close (50%) when Running 100 Pips (TP1)!
+         if(tp1Reached && m_cfg.usePartialCloseTP1 && !m_managed[m].partialDone)
            {
-            // 1. Execute Partial Close (50%) at 100 Pips first
-            if(m_cfg.usePartialCloseTP1 && !m_managed[m].partialDone)
+            if(curLots >= minLot * 2.0)
               {
-               if(curLots >= minLot * 2.0)
+               double closeVol = CRiskManager::NormalizeVolume(curLots * m_cfg.partialCloseRatio,
+                                                               minLot, curLots - minLot, stepLot);
+               if(closeVol >= minLot && (curLots - closeVol) >= minLot)
                  {
-                  double closeVol = CRiskManager::NormalizeVolume(curLots * m_cfg.partialCloseRatio,
-                                                                  minLot, curLots - minLot, stepLot);
-                  if(closeVol >= minLot && (curLots - closeVol) >= minLot)
+                  if(m_trade.PositionClosePartial(ticket, closeVol, (ulong)MathMax(0, m_cfg.slippagePoints)))
                     {
-                     if(m_trade.PositionClosePartial(ticket, closeVol, (ulong)MathMax(0, m_cfg.slippagePoints)))
-                       {
-                        m_managed[m].partialDone = true;
-                        curLots -= closeVol;
-                        logger.LogTradeEvent("PARTIAL_TP1", m_managed[m].setupId, ticket, dir, closeVol,
-                                             m_managed[m].entryPrice, curSL, curTP, curPrice,
-                                             curProfit * m_cfg.partialCloseRatio, curR,
-                                             m_managed[m].confluenceScore, m_managed[m].poiSummary,
-                                             "PARTIAL_50_AT_100PIPS", qtState, prof.profile);
-                       }
+                     m_managed[m].partialDone = true;
+                     curLots -= closeVol;
+                     logger.LogTradeEvent("PARTIAL_TP1", m_managed[m].setupId, ticket, dir, closeVol,
+                                          m_managed[m].entryPrice, curSL, curTP, curPrice,
+                                          curProfit * m_cfg.partialCloseRatio, curR,
+                                          m_managed[m].confluenceScore, m_managed[m].poiSummary,
+                                          "PARTIAL_50_AT_100PIPS", qtState, prof.profile);
                     }
-                  else
-                     m_managed[m].partialDone = true; // Cannot split minimum lot
                  }
                else
-                  m_managed[m].partialDone = true;
+                  m_managed[m].partialDone = true; // Cannot split minimum lot
               }
+            else
+               m_managed[m].partialDone = true;
+           }
 
-            // 2. Move SL to Break-Even simultaneously after reaching 100 Pips (TP1)
-            if(m_cfg.useBreakEvenAt1R && !m_managed[m].beApplied)
+         // Execute Break-Even SL modification once Stage-1 (+65 Pips) or Stage-2 (+100 Pips) is reached
+         if(beReached && m_cfg.useBreakEvenAt1R && !m_managed[m].beApplied)
+           {
+            double beBuffer = m_cfg.breakEvenBufferPoints * point;
+            double newSL    = (dir == BIAS_BULL ? NormalizeDouble(m_managed[m].entryPrice + beBuffer, digits)
+                                                : NormalizeDouble(m_managed[m].entryPrice - beBuffer, digits));
+
+            bool slImproved = (dir == BIAS_BULL ? (newSL > curSL) : (curSL == 0.0 || newSL < curSL));
+            if(slImproved && m_trade.PositionModify(ticket, newSL, curTP))
               {
-               double beBuffer = m_cfg.breakEvenBufferPoints * point;
-               double newSL    = (dir == BIAS_BULL ? NormalizeDouble(m_managed[m].entryPrice + beBuffer, digits)
-                                                   : NormalizeDouble(m_managed[m].entryPrice - beBuffer, digits));
-
-               bool slImproved = (dir == BIAS_BULL ? (newSL > curSL) : (curSL == 0.0 || newSL < curSL));
-               if(slImproved && m_trade.PositionModify(ticket, newSL, curTP))
-                 {
-                  m_managed[m].beApplied = true;
-                  m_managed[m].currentSL = newSL;
-                  logger.LogTradeEvent("BREAK_EVEN_1R", m_managed[m].setupId, ticket, dir, curLots,
-                                       m_managed[m].entryPrice, newSL, curTP, curPrice,
-                                       curProfit, curR, m_managed[m].confluenceScore,
-                                       m_managed[m].poiSummary, "SL_MOVED_TO_BE_AT_100PIPS", qtState, prof.profile);
-                 }
+               m_managed[m].beApplied = true;
+               m_managed[m].currentSL = newSL;
+               logger.LogTradeEvent("BREAK_EVEN_1R", m_managed[m].setupId, ticket, dir, curLots,
+                                    m_managed[m].entryPrice, newSL, curTP, curPrice,
+                                    curProfit, curR, m_managed[m].confluenceScore,
+                                    m_managed[m].poiSummary, "SL_MOVED_TO_BE", qtState, prof.profile);
               }
            }
         }
