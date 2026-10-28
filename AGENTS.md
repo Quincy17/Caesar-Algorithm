@@ -1,0 +1,3 @@
+- Jangan ubah kode yang sudah ada tanpa persetujuan saya
+- Pastikan setelah edit kode, lakukan pengecekan syntax untuk mengetahui syntax error atau tidak
+- Jangan lupa selalu update roadmap setiap selesai melakukan perubahan
