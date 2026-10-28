@@ -1,0 +1,8 @@
+{
+  "C_Cpp.errorSquiggles": "disabled",
+  "C_Cpp.intelliSenseEngine": "Tag Parser",
+  "files.associations": {
+    "*.mq5": "cpp",
+    "*.mqh": "cpp"
+  }
+}
