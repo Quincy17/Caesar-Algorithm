@@ -297,6 +297,66 @@ Tujuan: Menguji performa dan validitas aturan secara statistik di Strategy Teste
     - **Eliminasi Anchor Standalone M5:** POI `M5` dihapus dari anchor siklus harian, hanya `M15` yang digunakan sebagai POI anchor harian.
     - **Buka Hari Senin & Jumat Khusus Fase D:** Parameter `InpAllowMondayCycleD = true` dan `InpAllowFridayCycleD = true` membuka hari Senin dan Jumat secara eksklusif hanya untuk entry Fase D (pullback rendah risiko), sementara tracker HTF tetap menjaga disiplin Selasa–Kamis.
     - **Queue Buffer Log Setup:** Seluruh evaluasi setup (HTF maupun Cycle) di-drain menggunakan `while(PopLastLogEvent)` sehingga 0 setup terbuang dari `QT_Setups_Log.csv`.
+  - [x] **Backtest Iterasi 5 (`report-5`, `v1.21`: +$1,051.47, PF 1.59, 29 trades, DD 2.60%) & Arsitektur Tri-Engine Multi-Profile Simultan (`v1.30`):**
+    - **Temuan Kritis `report-5`:** Net profit menembus all-time high `+$1,051.47` (+6.52R, PF 1.59) dengan drawdown terendah dalam seluruh histori pengujian (`$665.50` / `2.60%`). 4 trade HTF pulih seutuhnya, Fase D menyumbang profit besar `+3.71R` (`+$556.63`), dan 0 setup yang terbuang dari log CSV.
+    - **Akar Penyebab Trade Terbatas (29 trades):** Sebanyak 34 pending limit order (54% dari setup yang armed) batal karena harga memantul langsung di *Proximal Edge* FVG tanpa pullback ke 50% CE (fenomena ICT *IOFED* — Institutional Order Flow Entry Drill); serta batasan arsitektur sebelumnya yang hanya menjalankan 1 profil secara bergantian.
+    - **Multi-Profile Tri-Engine Simultan (`v1.30`):** Ketiga Trade Profile (Scalping, Intraday, Swing) kini aktif bekerja secara serentak dalam 1 EA instance:
+      - Magic Number Offset Otomatis: Swing (`magic + 0`), Intraday (`magic + 1`), Scalping (`magic + 2`).
+      - **Profil Scalping:** POI M15/M5 di jendela likuiditas tinggi sesi London & NY AM (blok Q2 Judas & Q3 Expansion, Senin–Jumat), SL `60 pips` (`$6.00`), BE di `+50 pips` (`$5.00`), Partial 50% di `+50 pips` (`$5.00`), Full TP max `100 pips` (`$10.00`), Time Stop akhir blok 90m.
+      - **Profil Intraday:** Daily Bread AMDX/XAMD, default entry beralih ke `ENTRY_FVG_PROXIMAL` (IOFED Proximal Edge) untuk menangkap 34 order yang sebelumnya terlewat, SL `45–75 pips` (default `60 pips`), BE `+65 pips`, Partial 50% `+100 pips`, target Session ERL (Phase A High/Low atau Asian High/Low, `100–150 pips`).
+      - **Profil Swing:** HTF Narrative (W1/D1/H4 DOL), target Full HTF DOL / `300+ pips` runner, SL `60–75 pips`, BE `+65 pips`, Partial 50% `+100 pips`.
+      - **Smart Coexistence Rule (`Exec.mqh`):** Scalp dan Intraday diizinkan membuka posisi searah Swing asalkan posisi Swing yang sedang berjalan sudah mengamankan *Break-Even* (`beApplied == true`), menjaga total risiko portofolio tetap terkontrol.
+      - **Paten Ukuran Lot:** Seluruh profil tetap patuh pada aturan lot berbasis ekuitas: `0.05 lot` per `$5,000 Equity` (`0.25 lot` pada `$25k` equity).
+  - [x] **Backtest Iterasi 6 (`report-6`, `v1.30`) & Stabilisasi Scalping + CISD + MTF Sniper Entry (`v1.31`):**
+    - **Temuan Kritis `report-6`:**
+      - Profil **Intraday** terbukti sangat sehat dan profitable: `+$928.47` (PF 1.49, Win Rate 53.33%, 30 trades).
+      - Profil **Scalping** menjadi beban utama kerugian: `-$4,152.19` (-30.90R, 134 trades) akibat entry pada level-level standalone M5 yang sering berada di tengah chop/konsolidasi serta ketidakseimbangan matematika (SL 60 pips vs BE/partial 50 pips).
+      - Ditemukan bug pembatalan pending order lintas profil: pembatalan pending order pada satu profil memicu pembatalan pending order profil lain karena pemanggilan `CancelPendingOrders` tanpa isolasi magic number profil (`filterProfile = -1`).
+      - Ditemukan bug visualisasi/pencatatan log profil di `Logger.mqh` yang mencatat profil acuan global (`prof.profile`) bukan profil setup aktual (`tr.profile`).
+    - **Solusi & Implementasi Fitur `v1.31` (Opsi B):**
+      - **Stabilisasi Scalping Engine via AMDX/XAMD Continuation:** Entry scalping kini diselaraskan secara ketat dengan kelanjutan ekspansi/distribusi sesi harian AMDX/XAMD (Fase D) searah arah manipulasi harian pada zona diskon/premium, menghilangkan entry standalone M5 acak di area konsolidasi.
+      - **Konfirmasi Entry CISD (Change in State of Delivery):** Menambahkan algoritma deteksi CISD berbasis penutupan body candle M5 yang mematahkan harga pembukaan delivery run sebelum sweep/touch. Input baru `InpConfirmationMode` mendukung `CONFIRM_MODE_MSS_ONLY`, `CONFIRM_MODE_CISD_ONLY`, dan `CONFIRM_MODE_EITHER` (default: Either / konfirmasi tercepat).
+      - **Institutional MTF Sniper Entry:** Menambahkan logika Sniper Entry dengan prioritas tertinggi: SELL di POI fresh MTF/HTF yang berada tepat di atas atau memotong Buy-Side Liquidity (BSL) valid; BUY di POI fresh MTF/HTF yang berada tepat di bawah atau memotong Sell-Side Liquidity (SSL) valid. Dikonfigurasi aktif serentak untuk profil Intraday dan Scalping via input `InpEnableSniperEntry = true` (+2 poin skor konfluensi).
+      - **Simetri Rasio Risiko Scalping:** Kalibrasi parameter SL Scalping menjadi `50 pips` ($5.00) agar simetris dengan ambang BE `+50 pips` dan Partial close 50% di `+50 pips`, dengan Max TP tetap `100 pips` ($10.00).
+      - **Isolasi Pending Order Cancellation:** `OnTick()` membatalkan pending order yang setup-nya tidak lagi armed secara ketat per profil (`PROFILE_SCALPING`, `PROFILE_INTRADAY`, `PROFILE_SWING`) tanpa membatalkan pending order milik profil lainnya.
+      - **Logging Setup Profile Fix:** `Logger.mqh` kini mencatat profil trade riil (`tr.profile`) ke dalam `QT_Setups_Log.csv`.
+      - **Kompilasi Sukses:** Terverifikasi 100% kompilasi MetaEditor dengan `0 errors, 0 warnings`. Seluruh file binari `.ex5` dan `.mqh` telah diperbarui ke direktori terminal MT5.
+  - [x] **Backtest Iterasi 7 (`report-7`, `v1.31`) - Validasi Opsi B (Jan - Nov 2025):**
+    - **Pembalikan Kinerja Scalping yang Masif:** Kerugian Scalping berhasil ditekan drastis dari `-$4,152.19` (-30.90R di `report-6`) menjadi praktis Break-Even `-$20.52` (+3.11R realized, Win Rate 49.47%, PF 1.00 dari 285 deals). Filter kelanjutan ekspansi/distribusi AMDX Phase D sukses membatalkan 237 setup di luar fase (`CANCEL_CYCLE_DAY_PHASE_NOT_D`), dan kalibrasi risiko SL 50p / Partial 50% di +50p menyelamatkan modal >$4,100.
+    - **Konsistensi Intraday:** Profil Intraday tetap menghasilkan laba bersih positif: `+$645.66` (PF 1.13, 60 deals).
+    - **Hasil Total Akun:** Membalikkan performa dari rugi tajam menjadi **Net Profit Positif (+$148.30)** selama 11 bulan (365 total trades).
+    - **Pemeriksaan Fitur MT5 Forward:** Hasil `report-7` mencakup periode `2025.01.02 s/d 2025.11.28` karena penggunaan opsi tester `Forward: 1/2` saat `Optimization: Disabled`. MT5 secara arsitektural hanya menjalankan bagian backtest (1/2 awal) dan melewati bagian forward jika mode optimasi dinonaktifkan.
+  - [x] **Backtest Iterasi 8 (`report-8`, 21 Bulan Penuh) & Restrukturisasi Scalping Engine (`v1.32`):**
+    - **Audit Forensik `report-8` (2025.01.02 s/d 2026.09.18, 689 Trades):**
+      - **Profil Intraday Terbukti Konsisten Profit:** Net `+$441.95` (PF 1.05, 104 trades, average win `$215.74` vs loss `-$135.54`, payout ratio sehat `1.59:1`).
+      - **Profil Scalping Penyebab Tunggal Kegagalan:** Menyumbang kerugian `-$3,696.37` (-32.20R, 549 trades, 91.8% dari seluruh kerugian akun) dengan payout ratio hanya 1.02:1 ($100.27 vs -$98.19).
+      - **Akar Penyebab 1 — Reversal Prematur ($6,374 Bleed):** Sebanyak 61 trade scalping sempat mencapai floating profit `+0.5R s.d. +1.0R` (+25 s.d. +49 pips) namun berbalik membentur SL penuh -50 pips karena ketiadaan proteksi dini sebelum ambang kaku +50 pips.
+      - **Akar Penyebab 2 — Sesi London Q2 vs Q3:** London Q2 (Judas manipulation) rugi `-$2,415.10`, sedangkan London Q3 (True expansion) profit `+$1,003.08` (WR 50.4%, PF 1.18).
+      - **Akar Penyebab 3 — NY_AM Incompatibility:** Scalping di NY_AM rugi `-$2,284.35` akibat volatilitas pembukaan pasar AS yang menyapu SL 50 pips sebelum tren berkembang.
+      - **Akar Penyebab 4 — Bleeding Hari Kamis:** Hari Kamis menyumbang `-$2,127.11` (57.5% dari seluruh kerugian scalp).
+      - **Akar Penyebab 5 — POI Lemah:** POI `M15_RBS` dan `M15_Classic_V` menyumbang kerugian `-$1,684.71`.
+    - **Solusi & Implementasi Fitur `v1.32`:**
+      - **Stage-0.5 Early Defensive Break-Even (`InpScalpUseEarlyBE = true`):** Proteksi dini saat profit scalping mencapai `+30 pips` (`+0.6R`), otomatis menggeser SL ke titik entry + buffer 5 points, mengamankan 61 posisi dari pembalikan menjadi loss penuh.
+      - **Pemisahan Konfigurasi & Perbaikan Ekspektansi Scalping:** Menambahkan parameter independen di EA: `InpScalpSlPips = 45.0`, `InpScalpBePips = 45.0`, `InpScalpPartialPips = 45.0`, `InpScalpPartialRatio = 0.30` (menyisakan 70% runner untuk memaksimalkan win ke target 100 pips), dan `InpScalpFinalTpPips = 100.0`.
+      - **Filter Hari Kamis Toxic (`InpScalpAllowThursday = false`):** Mencegah eksekusi scalping di hari Kamis untuk memangkas potensi loss -$2,127.
+      - **Filter Sesi Scalping (`InpScalpSessionMode = SCALP_SESS_LONDON_ONLY`):** Mengecualikan volatilitas liar sesi NY_AM dan fokus pada London (tersedia opsi `SCALP_SESS_LONDON_Q3_ONLY` untuk tingkat kemenangan tertinggi).
+      - **Filter POI Lemah (`InpScalpFilterWeakPoi = true`):** Memblokir `M15_RBS` dan `M15_Classic_V` jika skor konfluensi < 12.
+      - **Verifikasi & Sinkronisasi:** Seluruh 25 file MQL5 lolos verifikasi sintaks (0 errors). Memperbaiki identifier `qtState.dayeDayOfWeek == 4` dan `tr.anchorPOI.id` di `Setup.mqh`, serta menyinkronkan seluruh file ke direktori terminal MT5.
+  - [x] **Backtest Iterasi 9 (`report-9`, `v1.32`) & Kalibrasi Sesi Scalp London Q3 + Swing H4 Only (`v1.33`):**
+    - **Hasil Signifikan `report-9`:**
+      - Pemulihan Scalping masif: kerugian terpangkas 93% dari `-$3,696.37` (`report-8`) menjadi `-$263.18` (PF 0.98, hampir break-even).
+      - Filter Kamis berhasil 100% (0 trade Kamis), Filter NY_AM berhasil 100% (0 trade NY_AM).
+      - Early BE (+30p) berhasil menyelamatkan 37 trade menjadi `BE_HIT` tanpa loss penuh.
+      - **Temuan Kritis Swing:** Swing menyumbang kerugian tersisa `-$1,694.79` karena mengambil POI H1 (`-$964.07`) dan D1 (`-$828.00`), sedangkan POI H4 Swing justru profit `+$466.10`.
+      - **Temuan Kritis Sesi Scalp:** London Q3 (True Expansion) menghasilkan profit `+$1,990.84` (WR 55.6%), sedangkan London Q2 (Judas Swing) menderita `-$2,254.02`.
+    - **Implementasi Fitur `v1.33`:**
+      - **Default Scalp Session ke London Q3 Only:** Mengubah default `InpScalpSessionMode = SCALP_SESS_LONDON_Q3_ONLY` untuk mengunci jendela profit institusional (+18.78R / +$1,990.84 di Report-9).
+      - **Isolasi Anchor POI Swing ke H4 Saja:** Pada `TradeProfile.mqh`, menonaktifkan POI H1 & D1 untuk Swing (`allowPOITF[TF_IDX_H1] = false; allowPOITF[TF_IDX_D1] = false;`), membatasi Swing hanya pada level H4 yang terbukti profit (+1.84R).
+      - **Verifikasi Sintaks:** 25 file MQL5 lolos verifikasi sintaks (0 errors), disinkronkan ke direktori terminal MT5.
+  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-implementasi `v1.33` (Periode penuh 2 tahun, `Forward: No`).
+  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-implementasi `v1.32` (Periode penuh 2 tahun, `Forward: No`).
+  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-implementasi `v1.31` (Periode penuh 2 tahun, `Forward: No`).
+  - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-implementasi `v1.30`.
   - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-implementasi `v1.21`.
   - [ ] Pengujian ulang di Strategy Tester dengan mode *Every tick based on real ticks* pasca-kalibrasi `v1.12`.
   - [ ] Pemisahan periode data menjadi **In-Sample (IS)** dan **Out-of-Sample (OOS)**.

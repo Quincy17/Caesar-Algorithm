@@ -1,4 +1,4 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //| Defines.mqh                                                      |
 //| Shared Constants, Enums, and Data Structures (QT-MSNR-ICT EA)    |
 //| Place in: MQL5/Include/QT/Defines.mqh                            |
@@ -6,9 +6,14 @@
 #ifndef QT_DEFINES_MQH
 #define QT_DEFINES_MQH
 
-#define QT_EA_VERSION         "1.21"
+#define QT_EA_VERSION         "1.33"
 #define QT_TARGET_SYMBOL      "XAUUSD"
 #define QT_MTF_COUNT          6
+
+// Multi-Profile Engine Magic Number Offsets
+#define QT_MAGIC_OFFSET_SWING    0
+#define QT_MAGIC_OFFSET_INTRADAY 1
+#define QT_MAGIC_OFFSET_SCALPING 2
 
 //+------------------------------------------------------------------+
 //| Time Engine Enums (M1)                                           |
@@ -104,6 +109,20 @@ enum ENUM_ENTRY_TYPE
    ENTRY_FVG_CE       = 0, // Limit at 50% Consequent Encroachment of FVG (Default)
    ENTRY_FVG_PROXIMAL = 1, // Limit at proximal edge of FVG
    ENTRY_MARKET_MSS   = 2  // Market execution on MSS candle close
+  };
+
+enum ENUM_CONFIRMATION_MODE
+  {
+   CONFIRM_MODE_MSS_ONLY  = 0, // Market Structure Shift only (Legacy)
+   CONFIRM_MODE_CISD_ONLY = 1, // Change in State of Delivery only
+   CONFIRM_MODE_EITHER    = 2  // Either CISD or MSS (First confirmed trigger)
+  };
+
+enum ENUM_SCALP_SESSION_FILTER
+  {
+   SCALP_SESS_LONDON_Q3_ONLY = 0, // London Q3 only (Highest statistical edge: 50.4% WR, PF 1.18)
+   SCALP_SESS_LONDON_ONLY    = 1, // London Q2 + Q3 (Excludes NY_AM)
+   SCALP_SESS_ALL            = 2  // All sessions (London + NY_AM)
   };
 
 //+------------------------------------------------------------------+
@@ -222,6 +241,7 @@ struct QTState
    bool            isTimeAllowed;       // Master time filter flag (Day && Session && Q90 && !FridayCutoff)
    bool            isCycleOnlyDay;      // v1.21: Mon/Fri enabled only for Daily Cycle Phase D entries
    bool            isCycleTimeAllowed;  // v1.21: Time filter for Daily Cycle tracker ((Day || CycleOnlyDay) && Session && Q90 && !FridayCutoff)
+   bool            isScalpTimeAllowed;  // v1.30: Scalping time filter (London & NY AM Q2/Q3 90m blocks && !FridayCutoff)
 
    void Reset()
      {
@@ -256,6 +276,7 @@ struct QTState
       isTimeAllowed        = false;
       isCycleOnlyDay       = false;
       isCycleTimeAllowed   = false;
+      isScalpTimeAllowed   = false;
      }
   };
 

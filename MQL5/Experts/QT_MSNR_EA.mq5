@@ -18,7 +18,7 @@
 //|  - M12 Friday Flat       : Mandatory Friday 15:00 NY Flat        |
 //+------------------------------------------------------------------+
 #property copyright "Caesar Algorithm - QT-MSNR-ICT"
-#property version   "1.21"
+#property version   "1.33"
 #property strict
 
 #include "../Include/QT/Defines.mqh"
@@ -40,7 +40,10 @@
 //| Input Parameters (PRD Section 7 + v1.1 Additions)                |
 //+------------------------------------------------------------------+
 input group "=== 1. Trade Profile & Execution Mode ==="
-input ENUM_TRADE_PROFILE  InpTradeProfile       = PROFILE_INTRADAY;           // Trade Profile (Scalping / Intraday / Swing)
+input ENUM_TRADE_PROFILE  InpTradeProfile       = PROFILE_INTRADAY;           // Primary Profile (Display Reference)
+input bool                InpEnableScalping     = true;                       // Enable Scalping Engine (TP: 100p, BE/Partial: 50p, SL: 60p)
+input bool                InpEnableIntraday     = true;                       // Enable Intraday Engine (Daily AMDX/XAMD, IOFED Proximal)
+input bool                InpEnableSwing        = true;                       // Enable Swing Engine (HTF Narrative, 300p Runner)
 input bool                InpSignalOnlyMode     = false;                      // Signal-Only Mode (Fase 6: True = No Orders)
 input ENUM_BIAS_GATE_MODE InpBiasGateMode       = BIAS_GATE_STRICT;           // Multi-TF Bias Gate Mode (STRICT / MAJORITY)
 input bool                InpUseW1Bias          = true;                       // Enable Weekly (W1) Bias
@@ -93,7 +96,9 @@ input group "=== 5. M7: Setup, Entry & Confluence Score ==="
 input int                 InpMinConfluenceScore = 6;                          // Minimum Confluence Score to Enter
 input double              InpCustomMinRR        = 0.0;                        // Custom Min RR (0 = Use Profile Default)
 input int                 InpMaxSetupBarsM5     = 36;                         // Max Setup Lifespan in M5 Bars (36 = 3h)
-input ENUM_ENTRY_TYPE     InpEntryType          = ENTRY_FVG_CE;               // Entry Mode (FVG CE 50% / Proximal / Market MSS)
+input ENUM_ENTRY_TYPE     InpEntryType          = ENTRY_FVG_PROXIMAL;         // Entry Mode (FVG Proximal IOFED / CE 50% / Market MSS)
+input ENUM_CONFIRMATION_MODE InpConfirmationMode = CONFIRM_MODE_EITHER;        // Entry Confirmation Mode (MSS Only / CISD Only / Either)
+input bool                InpEnableSniperEntry  = true;                       // Enable MTF Sniper Entry (Fresh POI above BSL / below SSL)
 input double              InpSlBufferAtrM5      = 0.20;                       // SL Buffer = mult * ATR(M5) + Spread
 input double              InpMaxSlAtrH1         = 2.50;                       // Skip Setup if SL > mult * ATR(H1)
 input double              InpTargetSlPips       = 60.0;                       // Target Manual SL Pips (60 pips = $6 on XAUUSD)
@@ -121,7 +126,20 @@ input bool                InpFridayNoNewEntry   = true;                       //
 input int                 InpFridayCloseHourNY  = 15;                         // Friday Forced Flat Hour (NY Time, default 15)
 input int                 InpFridayCloseMinNY   = 0;                          // Friday Forced Flat Minute (NY Time, default 0)
 
-input group "=== 7. M11: Forex Factory / MT5 News Filter ==="
+input group "=== 7. Scalping Profile Protection & Filters (v1.32) ==="
+input bool                InpScalpUseEarlyBE       = true;                       // Scalp Stage-0.5 Early Defense (Protect Profit >= 30p)
+input double              InpScalpEarlyBEDistPips  = 30.0;                       // Scalp Early BE Trigger Distance (Pips, default 30p = $3)
+input double              InpScalpEarlyBEBufferPts = 5.0;                        // Scalp Early BE Buffer (Points, default 5 pts)
+input double              InpScalpSlPips           = 45.0;                       // Scalp Stop Loss Distance (Pips, default 45p = $4.50)
+input double              InpScalpBePips           = 45.0;                       // Scalp Stage-1 Break-Even Trigger (Pips, default 45p)
+input double              InpScalpPartialPips      = 45.0;                       // Scalp Stage-2 Partial Close Trigger (Pips, default 45p)
+input double              InpScalpPartialRatio     = 0.30;                       // Scalp Partial Close Volume Ratio (0.30 = 30% close, 70% runner)
+input double              InpScalpFinalTpPips      = 100.0;                      // Scalp Final Take Profit Distance (Pips, default 100p = $10)
+input bool                InpScalpAllowThursday    = false;                      // Allow Scalping on Thursdays (False = Filter Toxic Thu)
+input ENUM_SCALP_SESSION_FILTER InpScalpSessionMode = SCALP_SESS_LONDON_Q3_ONLY; // Scalp Session Filter (London Q3 Only: +$1,990 in Report-9 / London Only / All)
+input bool                InpScalpFilterWeakPoi    = true;                       // Filter M15_RBS & M15_Classic_V if Confluence Score < 12
+
+input group "=== 8. M11: Forex Factory / MT5 News Filter ==="
 input bool                InpNewsEnabled        = true;                       // Enable High-Impact News Filter
 input ENUM_NEWS_SOURCE    InpNewsLiveSource     = NEWS_LIVE_FF_JSON;          // Live Source (Forex Factory JSON / MT5 Calendar)
 input int                 InpNewsPreHours       = 5;                          // Block Window Before News (Hours, default 5)
@@ -131,7 +149,7 @@ input int                 InpNewsRefreshMin     = 60;                         //
 input bool                InpNewsFailSafe       = true;                       // Block Entries if News Data Unavailable/Stale
 input string              InpNewsCsvFile        = "news_high_impact.csv";     // Historical News CSV File (Common/Files)
 
-input group "=== 8. M9: System, Magic Number, Visuals & CSV Logs ==="
+input group "=== 9. M9: System, Magic Number, Visuals & CSV Logs ==="
 input long                InpMagicNumber        = 20261001;                   // Base Magic Number (auto-offset per Profile)
 input bool                InpEnableVisuals      = true;                       // Draw Chart Objects & Dashboard
 input int                 InpVisualLookbackDays = 5;                          // Days of QT Boxes/Opens to Draw
@@ -148,6 +166,9 @@ CSwingEngine      g_swings;
 CMSNREngine       g_msnr;
 CICTEngine        g_ict;
 STradeProfileSpec g_profileSpec;
+STradeProfileSpec g_scalpSpec;
+STradeProfileSpec g_intraSpec;
+STradeProfileSpec g_swingSpec;
 CBiasEngine       g_bias;
 CSetupEngine      g_setup;
 CRiskManager      g_risk;
@@ -165,16 +186,14 @@ long              g_effectiveMagic = 20261001;
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   // Unique magic number per profile instance (PRD 4.10)
-   g_effectiveMagic = InpMagicNumber + (long)InpTradeProfile;
+   // Base magic number
+   g_effectiveMagic = InpMagicNumber;
 
-   // 1. Configure M10 Trade Profile
-   g_profileSpec.Configure(InpTradeProfile,
-                           InpBiasGateMode,
-                           InpUseW1Bias,
-                           InpUseD1Bias,
-                           InpUseH4Bias,
-                           InpCustomMinRR);
+   // 1. Configure Multi-Profile Tri-Engine Specs (M10)
+   g_scalpSpec.Configure(PROFILE_SCALPING, InpBiasGateMode, InpUseW1Bias, InpUseD1Bias, InpUseH4Bias, 1.5);
+   g_intraSpec.Configure(PROFILE_INTRADAY, InpBiasGateMode, InpUseW1Bias, InpUseD1Bias, InpUseH4Bias, (InpCustomMinRR > 0.0 ? InpCustomMinRR : 2.0));
+   g_swingSpec.Configure(PROFILE_SWING,    InpBiasGateMode, InpUseW1Bias, InpUseD1Bias, InpUseH4Bias, 3.0);
+   g_profileSpec = (InpTradeProfile == PROFILE_SCALPING ? g_scalpSpec : (InpTradeProfile == PROFILE_SWING ? g_swingSpec : g_intraSpec));
 
    // 2. Configure M1 Time Engine
    SQTTimeConfig tcfg;
@@ -183,6 +202,13 @@ int OnInit()
    tcfg.modeAServerToNYHours = InpModeAServerToNY;
    tcfg.modeBServerGmtHours  = InpModeBServerGMT;
    tcfg.ApplyProfilePreset(InpTradeProfile);
+   tcfg.allowLondon    = true;
+   tcfg.allowNyAm      = true;
+   tcfg.allow90mQ2     = true;
+   tcfg.allow90mQ3     = true;
+   tcfg.allowTuesday   = true;
+   tcfg.allowWednesday = true;
+   tcfg.allowThursday  = true;
 
    if(InpOverrideProfileTime)
      {
@@ -265,6 +291,8 @@ int OnInit()
    setCfg.customMinRR        = InpCustomMinRR;
    setCfg.maxSetupBarsM5     = InpMaxSetupBarsM5;
    setCfg.entryType          = InpEntryType;
+   setCfg.confirmMode        = InpConfirmationMode;
+   setCfg.enableSniperEntry  = InpEnableSniperEntry;
    setCfg.slBufferAtrMultM5  = InpSlBufferAtrM5;
    setCfg.maxSlAtrMultH1     = InpMaxSlAtrH1;
    setCfg.useM15M5Refinement = InpUseM15M5Refinement;
@@ -274,6 +302,17 @@ int OnInit()
    setCfg.maxSlPips          = InpMaxSlPips;
    setCfg.partialTp1Pips     = InpPartialTp1Pips;
    setCfg.runnerTpPips       = InpRunnerTpPips;
+   setCfg.scalpAllowThursday = InpScalpAllowThursday;
+   setCfg.scalpSessionMode   = InpScalpSessionMode;
+   setCfg.scalpFilterWeakPoi = InpScalpFilterWeakPoi;
+   setCfg.scalpUseEarlyBE    = InpScalpUseEarlyBE;
+   setCfg.scalpEarlyBePips   = InpScalpEarlyBEDistPips;
+   setCfg.scalpEarlyBeBufferPts = InpScalpEarlyBEBufferPts;
+   setCfg.scalpSlPips        = InpScalpSlPips;
+   setCfg.scalpBePips        = InpScalpBePips;
+   setCfg.scalpPartialPips   = InpScalpPartialPips;
+   setCfg.scalpPartialRatio  = InpScalpPartialRatio;
+   setCfg.scalpTpPips        = InpScalpFinalTpPips;
    g_setup.Init(setCfg);
 
    // 8. Configure M8 Risk & Execution Engines
@@ -299,6 +338,13 @@ int OnInit()
    ecfg.usePartialCloseTP1    = InpUsePartialTP1;
    ecfg.partialTp1Pips        = InpPartialTp1Pips;
    ecfg.useTimeStop           = InpUseTimeStop;
+   ecfg.useScalpEarlyBE       = InpScalpUseEarlyBE;
+   ecfg.scalpEarlyBePips      = InpScalpEarlyBEDistPips;
+   ecfg.scalpEarlyBeBufferPts = InpScalpEarlyBEBufferPts;
+   ecfg.scalpBePips           = InpScalpBePips;
+   ecfg.scalpPartialPips      = InpScalpPartialPips;
+   ecfg.scalpPartialRatio     = InpScalpPartialRatio;
+   ecfg.scalpFinalTpPips      = InpScalpFinalTpPips;
    g_exec.Init(_Symbol, ecfg);
 
    // 9. Configure M9 Logger & Visuals
@@ -397,7 +443,7 @@ void OnTick()
      }
 
    // 3b. Gate: Cancel any pending limit orders if QT trading session/90m time window has ended
-   if(!g_qtState.isTimeAllowed && !g_qtState.isCycleTimeAllowed && g_exec.CountPendingOrders() > 0)
+   if(!g_qtState.isTimeAllowed && !g_qtState.isCycleTimeAllowed && !g_qtState.isScalpTimeAllowed && g_exec.CountPendingOrders() > 0)
      {
       g_exec.CancelPendingOrders(BIAS_NEUTRAL, "TIME_WINDOW_ENDED",
                                  g_logger, g_qtState, g_profileSpec.profile);
@@ -424,49 +470,78 @@ void OnTick()
       g_biasState = g_bias.Update(g_mtf, g_swings, g_msnr, g_ict, g_qtState, g_profileSpec);
 
       // Cancel pending order if Gate TF Bias flipped against an armed setup (PRD 4.10)
-      if(!g_biasState.allowBuy && !g_biasState.allowBuyCycle && g_exec.CountPendingOrders(BIAS_BULL) > 0)
+      if(!g_biasState.allowBuy && !g_biasState.allowBuyCycle && !g_biasState.allowBuyScalp && g_exec.CountPendingOrders(BIAS_BULL) > 0)
          g_exec.CancelPendingOrders(BIAS_BULL, "BIAS_GATE_FLIPPED_AGAINST_BUY", g_logger, g_qtState, g_profileSpec.profile);
-      if(!g_biasState.allowSell && !g_biasState.allowSellCycle && g_exec.CountPendingOrders(BIAS_BEAR) > 0)
+      if(!g_biasState.allowSell && !g_biasState.allowSellCycle && !g_biasState.allowSellScalp && g_exec.CountPendingOrders(BIAS_BEAR) > 0)
          g_exec.CancelPendingOrders(BIAS_BEAR, "BIAS_GATE_FLIPPED_AGAINST_SELL", g_logger, g_qtState, g_profileSpec.profile);
 
-      // Step M7 Setup State Machine on new M5 closed bar
+      // Step M7 Setup State Machine on new M5 closed bar for all 3 Profiles simultaneously
       if(g_mtf.IsNewBar(TF_IDX_M5))
         {
-         g_setup.Update(g_mtf, g_swings, g_msnr, g_ict,
-                        g_qtState, g_biasState, g_profileSpec,
-                        spreadPrice, isNewsBlocked, newsWhy);
+         g_setup.UpdateAllProfiles(g_mtf, g_swings, g_msnr, g_ict,
+                                   g_qtState, g_biasState,
+                                   g_scalpSpec, g_intraSpec, g_swingSpec,
+                                   spreadPrice, isNewsBlocked, newsWhy,
+                                   InpEnableScalping, InpEnableIntraday, InpEnableSwing);
 
          // Flush all newly evaluated / rejected setups to CSV journal
          SSetupTracker evalSetup;
          while(g_setup.PopLastLogEvent(evalSetup))
             g_logger.LogSetup(evalSetup, g_qtState, g_biasState, g_profileSpec);
 
-         // Immediately cancel broker pending limit orders if their setup was invalidated or expired
-         if(g_setup.GetBuySetup().state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BULL) > 0)
-            g_exec.CancelPendingOrders(BIAS_BULL, "BUY_SETUP_INVALIDATED", g_logger, g_qtState, g_profileSpec.profile);
-         if(g_setup.GetSellSetup().state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BEAR) > 0)
-            g_exec.CancelPendingOrders(BIAS_BEAR, "SELL_SETUP_INVALIDATED", g_logger, g_qtState, g_profileSpec.profile);
+         // Cancel pending orders per profile if that profile's setup invalidated
+         // 1. Scalping
+         if(InpEnableScalping)
+           {
+            if(g_setup.GetSetup(PROFILE_SCALPING, BIAS_BULL).state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BULL, PROFILE_SCALPING) > 0)
+               g_exec.CancelPendingOrders(BIAS_BULL, "SCALP_BUY_SETUP_INVALIDATED", g_logger, g_qtState, PROFILE_SCALPING, PROFILE_SCALPING);
+            if(g_setup.GetSetup(PROFILE_SCALPING, BIAS_BEAR).state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BEAR, PROFILE_SCALPING) > 0)
+               g_exec.CancelPendingOrders(BIAS_BEAR, "SCALP_SELL_SETUP_INVALIDATED", g_logger, g_qtState, PROFILE_SCALPING, PROFILE_SCALPING);
+           }
+         // 2. Intraday
+         if(InpEnableIntraday)
+           {
+            if(g_setup.GetSetup(PROFILE_INTRADAY, BIAS_BULL).state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BULL, PROFILE_INTRADAY) > 0)
+               g_exec.CancelPendingOrders(BIAS_BULL, "INTRA_BUY_SETUP_INVALIDATED", g_logger, g_qtState, PROFILE_INTRADAY, PROFILE_INTRADAY);
+            if(g_setup.GetSetup(PROFILE_INTRADAY, BIAS_BEAR).state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BEAR, PROFILE_INTRADAY) > 0)
+               g_exec.CancelPendingOrders(BIAS_BEAR, "INTRA_SELL_SETUP_INVALIDATED", g_logger, g_qtState, PROFILE_INTRADAY, PROFILE_INTRADAY);
+           }
+         // 3. Swing
+         if(InpEnableSwing)
+           {
+            if(g_setup.GetSetup(PROFILE_SWING, BIAS_BULL).state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BULL, PROFILE_SWING) > 0)
+               g_exec.CancelPendingOrders(BIAS_BULL, "SWING_BUY_SETUP_INVALIDATED", g_logger, g_qtState, PROFILE_SWING, PROFILE_SWING);
+            if(g_setup.GetSetup(PROFILE_SWING, BIAS_BEAR).state != SETUP_S4_ARMED && g_exec.CountPendingOrders(BIAS_BEAR, PROFILE_SWING) > 0)
+               g_exec.CancelPendingOrders(BIAS_BEAR, "SWING_SELL_SETUP_INVALIDATED", g_logger, g_qtState, PROFILE_SWING, PROFILE_SWING);
+           }
         }
      }
 
-   // 7. Check Risk Circuit Breakers & Execute S4_ARMED Setups
+   // 7. Check Risk Circuit Breakers & Execute S4_ARMED Setups across all active profiles
    string riskBlockWhy = "OK";
    bool canOpenNewTrade = g_risk.UpdateAndCheckCanTrade(g_timeEngine, g_qtState, riskBlockWhy);
 
-   if(canOpenNewTrade && !isNewsBlocked && (g_qtState.isTimeAllowed || g_qtState.isCycleTimeAllowed))
+   if(canOpenNewTrade && !isNewsBlocked && (g_qtState.isTimeAllowed || g_qtState.isCycleTimeAllowed || g_qtState.isScalpTimeAllowed))
      {
       double atrM5 = g_mtf.GetATR(TF_IDX_M5);
       double atrH1 = g_mtf.GetATR(TF_IDX_H1);
 
-      SSetupTracker buyTr = g_setup.GetBuySetup();
-      if(buyTr.state == SETUP_S4_ARMED && buyTr.orderTicket == 0)
-         g_exec.ExecuteArmedSetup(buyTr, g_risk, g_setup, g_msnr, g_logger,
-                                  g_qtState, g_biasState, g_profileSpec, InpSignalOnlyMode, atrM5, atrH1);
+      SSetupTracker armedSetups[];
+      int armedCount = g_setup.GetArmedSetups(armedSetups);
 
-      SSetupTracker sellTr = g_setup.GetSellSetup();
-      if(sellTr.state == SETUP_S4_ARMED && sellTr.orderTicket == 0)
-         g_exec.ExecuteArmedSetup(sellTr, g_risk, g_setup, g_msnr, g_logger,
-                                  g_qtState, g_biasState, g_profileSpec, InpSignalOnlyMode, atrM5, atrH1);
+      for(int i = 0; i < armedCount; i++)
+        {
+         if(armedSetups[i].orderTicket == 0)
+           {
+            STradeProfileSpec curProf;
+            if(armedSetups[i].profile == PROFILE_SCALPING)      curProf = g_scalpSpec;
+            else if(armedSetups[i].profile == PROFILE_SWING)    curProf = g_swingSpec;
+            else                                                curProf = g_intraSpec;
+
+            g_exec.ExecuteArmedSetup(armedSetups[i], g_risk, g_setup, g_msnr, g_logger,
+                                     g_qtState, g_biasState, curProf, InpSignalOnlyMode, atrM5, atrH1);
+           }
+        }
      }
 
    // 8. Render Chart Visuals & Dashboard

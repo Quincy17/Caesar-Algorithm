@@ -105,15 +105,15 @@ struct STradeProfileSpec
         }
       else // PROFILE_SWING
         {
-         // Gate: W1 & D1 | Score: H4 | Anchor POI: W1, D1, H4, H1 | Trigger: H1 | Entry: M15 | RR: 3.0
+         // Gate: W1 & D1 | Score: H4 | Anchor POI: H4 Only (v1.33: H1 & D1 eliminated to prevent wide swing drag) | Trigger: H1 | Entry: M15 | RR: 3.0
          isGateTF[TF_IDX_W1]  = enableW1;
          isGateTF[TF_IDX_D1]  = enableD1;
          isScoreTF[TF_IDX_H4] = enableH4;
 
-         allowPOITF[TF_IDX_W1]  = true;
-         allowPOITF[TF_IDX_D1]  = true;
-         allowPOITF[TF_IDX_H4]  = true;
-         allowPOITF[TF_IDX_H1]  = true;
+         allowPOITF[TF_IDX_W1]  = false;
+         allowPOITF[TF_IDX_D1]  = false;
+         allowPOITF[TF_IDX_H4]  = true; // H4 is the only proven profitable Anchor POI for Swing (+$466.10 in Report-9)
+         allowPOITF[TF_IDX_H1]  = false; // H1 eliminated (-$964.07 drag in Report-9)
          allowPOITF[TF_IDX_M15] = false;
 
          triggerTfIdx           = TF_IDX_H1;

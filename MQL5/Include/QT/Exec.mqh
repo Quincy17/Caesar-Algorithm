@@ -290,6 +290,15 @@ struct SExecConfig
    bool   useTimeStop;            // Enforce profile duration limit
    bool   closeOrBeBeforeNews;    // Optional: move to BE before news window (default false)
 
+   // v1.32 Scalping Protection & Expectancy Repair
+   bool   useScalpEarlyBE;
+   double scalpEarlyBePips;       // Default 30.0 pips ($3.00 on XAUUSD) for Stage-0.5 Early Defense
+   double scalpEarlyBeBufferPts;  // Default 5.0 points
+   double scalpBePips;            // Default 45.0 pips for Stage-1 Break-Even
+   double scalpPartialPips;       // Default 45.0 pips for Stage-2 Partial Close
+   double scalpPartialRatio;      // Default 0.30 (30% partial close, leaving 70% runner)
+   double scalpFinalTpPips;       // Default 100.0 pips
+
    void SetDefaults()
      {
       magicNumber           = 20261001;
@@ -303,6 +312,14 @@ struct SExecConfig
       partialTp1Pips        = 100.0;
       useTimeStop           = true;
       closeOrBeBeforeNews   = false;
+
+      useScalpEarlyBE       = true;
+      scalpEarlyBePips      = 30.0;
+      scalpEarlyBeBufferPts = 5.0;
+      scalpBePips           = 45.0;
+      scalpPartialPips      = 45.0;
+      scalpPartialRatio     = 0.30;
+      scalpFinalTpPips      = 100.0;
      }
   };
 
@@ -315,6 +332,7 @@ struct SManagedTrade
    ulong                positionTicket;
    ulong                positionId;
    string               setupId;
+   ENUM_TRADE_PROFILE   profile;
    ENUM_BIAS_DIR        direction;
    bool                 wasMarketOrder;
 
@@ -350,6 +368,7 @@ struct SManagedTrade
    double               mfeR;
    double               maePrice;
    double               maeR;
+   bool                 earlyBeApplied;
    bool                 beApplied;
    bool                 partialDone;
    double               atrM5AtEntry;
@@ -373,6 +392,7 @@ struct SManagedTrade
       positionTicket     = 0;
       positionId         = 0;
       setupId            = "";
+      profile            = PROFILE_INTRADAY;
       direction          = BIAS_NEUTRAL;
       wasMarketOrder     = false;
       openServerTime     = 0;
@@ -404,6 +424,7 @@ struct SManagedTrade
       mfeR               = 0.0;
       maePrice           = 0.0;
       maeR               = 0.0;
+      earlyBeApplied     = false;
       beApplied          = false;
       partialDone        = false;
       atrM5AtEntry       = 0.0;
@@ -453,6 +474,50 @@ private:
          if(m_managed[i].active && m_managed[i].positionTicket == posTicket)
             return i;
       return -1;
+     }
+
+   bool              IsOurMagic(const long magic) const
+     {
+      return (magic == m_cfg.magicNumber + QT_MAGIC_OFFSET_SWING ||
+              magic == m_cfg.magicNumber + QT_MAGIC_OFFSET_INTRADAY ||
+              magic == m_cfg.magicNumber + QT_MAGIC_OFFSET_SCALPING);
+     }
+
+   ENUM_TRADE_PROFILE MagicToProfile(const long magic) const
+     {
+      if(magic == m_cfg.magicNumber + QT_MAGIC_OFFSET_SCALPING) return PROFILE_SCALPING;
+      if(magic == m_cfg.magicNumber + QT_MAGIC_OFFSET_INTRADAY) return PROFILE_INTRADAY;
+      return PROFILE_SWING;
+     }
+
+   long              ProfileToMagic(const ENUM_TRADE_PROFILE prof) const
+     {
+      if(prof == PROFILE_SCALPING) return m_cfg.magicNumber + QT_MAGIC_OFFSET_SCALPING;
+      if(prof == PROFILE_INTRADAY) return m_cfg.magicNumber + QT_MAGIC_OFFSET_INTRADAY;
+      return m_cfg.magicNumber + QT_MAGIC_OFFSET_SWING;
+     }
+
+   bool              CanOpenProfileSetup(const SSetupTracker &tr) const
+     {
+      // 1. Prevent duplicate pending orders or positions in this same profile & direction
+      if(CountPendingOrders(tr.direction, tr.profile) > 0)
+         return false;
+      if(CountOpenPositions(tr.direction, tr.profile) > 0)
+         return false;
+
+      // 2. Smart Coexistence Rule:
+      // Allow Scalp/Intraday/Swing in the same direction IF any existing position
+      // in that direction already has Break-Even applied (beApplied == true).
+      // If an existing position in the same direction is still bearing open risk, block to prevent overleveraging.
+      for(int i = 0; i < m_managedCount; i++)
+        {
+         if(m_managed[i].active && m_managed[i].direction == tr.direction && m_managed[i].profile != tr.profile)
+           {
+            if(!m_managed[i].beApplied)
+               return false;
+           }
+        }
+      return true;
      }
 
    void              RegisterManagedPosition(const ulong posTicket,
@@ -509,6 +574,7 @@ private:
       m_managed[slot].positionTicket     = posTicket;
       m_managed[slot].positionId         = posId;
       m_managed[slot].setupId            = (StringLen(tr.setupId) > 0 ? tr.setupId : StringFormat("REC_%I64u", posTicket));
+      m_managed[slot].profile            = tr.profile;
       m_managed[slot].direction          = tr.direction;
       m_managed[slot].wasMarketOrder     = tr.isMarketOrder;
 
@@ -646,7 +712,7 @@ private:
       else if(lastDealReason == DEAL_REASON_SL ||
               (mt.currentSL > 0.0 && MathAbs(avgExitPrice - mt.currentSL) <= riskDist * 0.20))
         {
-         if(mt.beApplied)
+         if(mt.beApplied || mt.earlyBeApplied)
             outcome = (mt.partialDone ? "TP1_THEN_BE" : "BE_HIT");
          else
             outcome = "SL_HIT";
@@ -655,7 +721,7 @@ private:
          outcome = (mt.partialDone ? "TP1_THEN_TP" : "TP_FULL");
       else if(realizedR <= -0.5)
          outcome = "SL_HIT";
-      else if(mt.beApplied)
+      else if(mt.beApplied || mt.earlyBeApplied)
          outcome = (mt.partialDone ? "TP1_THEN_BE" : "BE_HIT");
 
       // Populate SClosedTradeJournal
@@ -664,7 +730,7 @@ private:
       j.positionId          = posId;
       j.setupId             = mt.setupId;
       j.symbol              = m_symbol;
-      j.profile             = profile;
+      j.profile             = mt.profile;
       j.direction           = mt.direction;
       j.wasMarketOrder      = mt.wasMarketOrder;
 
@@ -711,7 +777,7 @@ private:
       j.mfeR                = mt.mfeR;
       j.maePrice            = mt.maePrice;
       j.maeR                = mt.maeR;
-      j.beTriggered         = mt.beApplied;
+      j.beTriggered         = (mt.beApplied || mt.earlyBeApplied ? 1 : 0);
       j.partialTp1Triggered = mt.partialDone;
       j.atrM5AtEntry        = mt.atrM5AtEntry;
       j.atrH1AtEntry        = mt.atrH1AtEntry;
@@ -768,7 +834,7 @@ public:
 
    //+------------------------------------------------------------------+
    //| OnInit State Recovery: Rebuild state from existing positions     |
-   //| and pending orders matching MagicNumber                          |
+   //| and pending orders matching any of our Profile Magic Numbers     |
    //+------------------------------------------------------------------+
    void              RecoverStateOnInit(const QTState &qtState,
                                         const SBiasState &biasState,
@@ -784,7 +850,8 @@ public:
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0)
             continue;
-         if(PositionGetInteger(POSITION_MAGIC) != m_cfg.magicNumber)
+         long posMagic = PositionGetInteger(POSITION_MAGIC);
+         if(!IsOurMagic(posMagic))
             continue;
          if(PositionGetString(POSITION_SYMBOL) != m_symbol)
             continue;
@@ -797,21 +864,25 @@ public:
          double tpP        = PositionGetDouble(POSITION_TP);
          string comment    = PositionGetString(POSITION_COMMENT);
 
+         ENUM_TRADE_PROFILE posProf = MagicToProfile(posMagic);
+
          SSetupTracker dummy;
-         dummy.Reset(dir);
+         dummy.Reset(dir, posProf);
          dummy.setupId    = (StringLen(comment) > 0 ? comment : StringFormat("REC_%I64u", ticket));
          dummy.entryPrice = openP;
          dummy.slPrice    = slP;
          dummy.tpPrice    = tpP;
-         dummy.tp1Price   = (dir == BIAS_BULL ? openP + MathAbs(openP - slP) : openP - MathAbs(openP - slP));
+         double tp1Pips   = (posProf == PROFILE_SCALPING ? 50.0 : (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+         double tp1D      = QTPipsToPrice(m_symbol, tp1Pips);
+         dummy.tp1Price   = (dir == BIAS_BULL ? openP + tp1D : openP - tp1D);
          double slDist    = MathAbs(openP - slP);
          dummy.rrRatio    = (slDist > 1e-5 ? MathAbs(tpP - openP) / slDist : 0.0);
 
          double riskUsd = riskMgr.CalcRiskMoneyForVolume(dir, lots, openP, slP);
          RegisterManagedPosition(ticket, dummy, lots, openP, riskUsd, qtState, biasState, atrM5, atrH1);
-         setupEngine.NotifyTradeFilled(dir, ticket, msnr);
-         PrintFormat("[Exec] Recovered open position #%I64u (%s %.2f lots @ %.2f)",
-                     ticket, QTBiasToString(dir), lots, openP);
+         setupEngine.NotifyTradeFilled(dir, ticket, msnr, posProf);
+         PrintFormat("[Exec] Recovered open position #%I64u (%s %s %.2f lots @ %.2f)",
+                     ticket, QTProfileToString(posProf), QTBiasToString(dir), lots, openP);
         }
 
       int ordTotal = OrdersTotal();
@@ -820,22 +891,25 @@ public:
          ulong ticket = OrderGetTicket(i);
          if(ticket == 0)
             continue;
-         if(OrderGetInteger(ORDER_MAGIC) != m_cfg.magicNumber)
+         long ordMagic = OrderGetInteger(ORDER_MAGIC);
+         if(!IsOurMagic(ordMagic))
             continue;
          if(OrderGetString(ORDER_SYMBOL) != m_symbol)
             continue;
 
          long ordType      = OrderGetInteger(ORDER_TYPE);
          ENUM_BIAS_DIR dir = ((ordType == ORDER_TYPE_BUY_LIMIT || ordType == ORDER_TYPE_BUY_STOP) ? BIAS_BULL : BIAS_BEAR);
-         setupEngine.NotifyOrderPlaced(dir, ticket);
-         PrintFormat("[Exec] Recovered pending order #%I64u (%s)", ticket, QTBiasToString(dir));
+         ENUM_TRADE_PROFILE ordProf = MagicToProfile(ordMagic);
+         setupEngine.NotifyOrderPlaced(dir, ticket, ordProf);
+         PrintFormat("[Exec] Recovered pending order #%I64u (%s %s)",
+                     ticket, QTProfileToString(ordProf), QTBiasToString(dir));
         }
      }
 
    //+------------------------------------------------------------------+
    //| Count Active Positions & Pending Orders for MagicNumber          |
    //+------------------------------------------------------------------+
-   int               CountOpenPositions(const ENUM_BIAS_DIR filterDir = BIAS_NEUTRAL) const
+   int               CountOpenPositions(const ENUM_BIAS_DIR filterDir = BIAS_NEUTRAL, const int filterProfile = -1) const
      {
       int cnt = 0;
       int total = PositionsTotal();
@@ -843,7 +917,9 @@ public:
         {
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0) continue;
-         if(PositionGetInteger(POSITION_MAGIC) != m_cfg.magicNumber) continue;
+         long pMagic = PositionGetInteger(POSITION_MAGIC);
+         if(!IsOurMagic(pMagic)) continue;
+         if(filterProfile >= 0 && pMagic != ProfileToMagic((ENUM_TRADE_PROFILE)filterProfile)) continue;
          if(PositionGetString(POSITION_SYMBOL) != m_symbol) continue;
 
          long pType = PositionGetInteger(POSITION_TYPE);
@@ -854,7 +930,7 @@ public:
       return cnt;
      }
 
-   int               CountPendingOrders(const ENUM_BIAS_DIR filterDir = BIAS_NEUTRAL) const
+   int               CountPendingOrders(const ENUM_BIAS_DIR filterDir = BIAS_NEUTRAL, const int filterProfile = -1) const
      {
       int cnt = 0;
       int total = OrdersTotal();
@@ -862,7 +938,9 @@ public:
         {
          ulong ticket = OrderGetTicket(i);
          if(ticket == 0) continue;
-         if(OrderGetInteger(ORDER_MAGIC) != m_cfg.magicNumber) continue;
+         long oMagic = OrderGetInteger(ORDER_MAGIC);
+         if(!IsOurMagic(oMagic)) continue;
+         if(filterProfile >= 0 && oMagic != ProfileToMagic((ENUM_TRADE_PROFILE)filterProfile)) continue;
          if(OrderGetString(ORDER_SYMBOL) != m_symbol) continue;
 
          long oType = OrderGetInteger(ORDER_TYPE);
@@ -875,20 +953,23 @@ public:
      }
 
    //+------------------------------------------------------------------+
-   //| Cancel All Pending Orders (or by Direction)                      |
+   //| Cancel All Pending Orders (or by Direction / Profile)            |
    //+------------------------------------------------------------------+
    int               CancelPendingOrders(const ENUM_BIAS_DIR filterDir,
                                          const string reason,
                                          const CQTLogger &logger,
                                          const QTState &qtState,
-                                         const ENUM_TRADE_PROFILE profile)
+                                         const ENUM_TRADE_PROFILE profile = PROFILE_INTRADAY,
+                                         const int filterProfile = -1)
      {
       int cancelled = 0;
       for(int i = OrdersTotal() - 1; i >= 0; i--)
         {
          ulong ticket = OrderGetTicket(i);
          if(ticket == 0) continue;
-         if(OrderGetInteger(ORDER_MAGIC) != m_cfg.magicNumber) continue;
+         long oMagic = OrderGetInteger(ORDER_MAGIC);
+         if(!IsOurMagic(oMagic)) continue;
+         if(filterProfile >= 0 && oMagic != ProfileToMagic((ENUM_TRADE_PROFILE)filterProfile)) continue;
          if(OrderGetString(ORDER_SYMBOL) != m_symbol) continue;
 
          long oType = OrderGetInteger(ORDER_TYPE);
@@ -897,6 +978,7 @@ public:
          if(filterDir != BIAS_NEUTRAL && dir != filterDir)
             continue;
 
+         ENUM_TRADE_PROFILE ordProf = MagicToProfile(oMagic);
          double lots   = OrderGetDouble(ORDER_VOLUME_CURRENT);
          double price  = OrderGetDouble(ORDER_PRICE_OPEN);
          double sl     = OrderGetDouble(ORDER_SL);
@@ -907,7 +989,7 @@ public:
            {
             cancelled++;
             logger.LogTradeEvent("ORDER_CANCELLED", comm, ticket, dir, lots,
-                                 price, sl, tp, 0.0, 0.0, 0.0, 0, "", reason, qtState, profile);
+                                 price, sl, tp, 0.0, 0.0, 0.0, 0, "", reason, qtState, ordProf);
            }
         }
       return cancelled;
@@ -928,7 +1010,8 @@ public:
         {
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0) continue;
-         if(PositionGetInteger(POSITION_MAGIC) != m_cfg.magicNumber) continue;
+         long posMagic = PositionGetInteger(POSITION_MAGIC);
+         if(!IsOurMagic(posMagic)) continue;
          if(PositionGetString(POSITION_SYMBOL) != m_symbol) continue;
 
          long pType        = PositionGetInteger(POSITION_TYPE);
@@ -940,6 +1023,7 @@ public:
          double curP       = PositionGetDouble(POSITION_PRICE_CURRENT);
          double profit     = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
          string comm       = PositionGetString(POSITION_COMMENT);
+         ENUM_TRADE_PROFILE posProf = MagicToProfile(posMagic);
 
          int mIdx = FindManagedIndex(ticket);
          double initRiskDist = (mIdx >= 0 ? MathAbs(m_managed[mIdx].entryPrice - m_managed[mIdx].initialSL)
@@ -1055,23 +1139,28 @@ public:
       if(tr.state != SETUP_S4_ARMED || tr.orderTicket != 0)
          return false;
 
-      // Prevent duplicate orders in the same direction
-      if(CountOpenPositions(tr.direction) > 0 || CountPendingOrders(tr.direction) > 0)
+      // Prevent duplicate orders in this profile / direction & apply Smart Coexistence
+      if(!CanOpenProfileSetup(tr))
          return false;
 
+      // Set executor magic to this setup's profile magic!
+      long orderMagic = ProfileToMagic(tr.profile);
+      m_trade.SetExpertMagicNumber(orderMagic);
+
       string poiSummary = QTTfIndexToString(tr.anchorPOI.tfIdx) + "_" + QTPOITypeToString(tr.anchorPOI.type);
+      string orderComment = StringFormat("[%s] %s", QTProfileToString(tr.profile), tr.setupId);
 
       // Fase 6: Signal-Only Mode (Alert + CSV Log without placing broker order)
       if(isSignalOnlyMode)
         {
-         Alert(StringFormat("[SIGNAL-ONLY] %s %s | Entry=%.2f SL=%.2f TP=%.2f RR=%.2f Score=%d",
-                            m_symbol, QTBiasToString(tr.direction),
+         Alert(StringFormat("[SIGNAL-ONLY][%s] %s %s | Entry=%.2f SL=%.2f TP=%.2f RR=%.2f Score=%d",
+                            QTProfileToString(tr.profile), m_symbol, QTBiasToString(tr.direction),
                             tr.entryPrice, tr.slPrice, tr.tpPrice,
                             tr.rrRatio, tr.score.totalScore));
          logger.LogTradeEvent("SIGNAL_ARMED", tr.setupId, 0, tr.direction, 0.0,
                               tr.entryPrice, tr.slPrice, tr.tpPrice, 0.0, 0.0, 0.0,
-                              tr.score.totalScore, poiSummary, "SIGNAL_ONLY_MODE", qtState, prof.profile);
-         setupEngine.NotifySetupCompleted(tr.direction, "SIGNAL_SENT");
+                              tr.score.totalScore, poiSummary, "SIGNAL_ONLY_MODE", qtState, tr.profile);
+         setupEngine.NotifySetupCompleted(tr.direction, "SIGNAL_SENT", tr.profile);
          return true;
         }
 
@@ -1081,8 +1170,8 @@ public:
         {
          logger.LogTradeEvent("EXEC_REJECTED", tr.setupId, 0, tr.direction, 0.0,
                               tr.entryPrice, tr.slPrice, tr.tpPrice, 0.0, 0.0, 0.0,
-                              tr.score.totalScore, poiSummary, rejectWhy, qtState, prof.profile);
-         setupEngine.NotifySetupCompleted(tr.direction, rejectWhy);
+                              tr.score.totalScore, poiSummary, rejectWhy, qtState, tr.profile);
+         setupEngine.NotifySetupCompleted(tr.direction, rejectWhy, tr.profile);
          return false;
         }
 
@@ -1091,8 +1180,8 @@ public:
         {
          logger.LogTradeEvent("EXEC_REJECTED", tr.setupId, 0, tr.direction, 0.0,
                               tr.entryPrice, tr.slPrice, tr.tpPrice, 0.0, 0.0, 0.0,
-                              tr.score.totalScore, poiSummary, rejectWhy, qtState, prof.profile);
-         setupEngine.NotifySetupCompleted(tr.direction, rejectWhy);
+                              tr.score.totalScore, poiSummary, rejectWhy, qtState, tr.profile);
+         setupEngine.NotifySetupCompleted(tr.direction, rejectWhy, tr.profile);
          return false;
         }
 
@@ -1113,7 +1202,7 @@ public:
         {
          if(slNorm >= entryNorm - minStopDist || bid <= slNorm + minStopDist || ask >= tpNorm - minStopDist)
            {
-            setupEngine.NotifySetupCompleted(tr.direction, "INVALID_OR_CROSSED_STOPS");
+            setupEngine.NotifySetupCompleted(tr.direction, "INVALID_OR_CROSSED_STOPS", tr.profile);
             return false;
            }
         }
@@ -1121,7 +1210,7 @@ public:
         {
          if(slNorm <= entryNorm + minStopDist || ask >= slNorm - minStopDist || bid <= tpNorm + minStopDist)
            {
-            setupEngine.NotifySetupCompleted(tr.direction, "INVALID_OR_CROSSED_STOPS");
+            setupEngine.NotifySetupCompleted(tr.direction, "INVALID_OR_CROSSED_STOPS", tr.profile);
             return false;
            }
         }
@@ -1145,16 +1234,16 @@ public:
          if(useMarket)
            {
             if(tr.direction == BIAS_BULL)
-               sent = m_trade.Buy(lots, m_symbol, 0.0, slNorm, tpNorm, tr.setupId);
+               sent = m_trade.Buy(lots, m_symbol, 0.0, slNorm, tpNorm, orderComment);
             else
-               sent = m_trade.Sell(lots, m_symbol, 0.0, slNorm, tpNorm, tr.setupId);
+               sent = m_trade.Sell(lots, m_symbol, 0.0, slNorm, tpNorm, orderComment);
            }
          else
            {
             if(tr.direction == BIAS_BULL)
-               sent = m_trade.BuyLimit(lots, entryNorm, m_symbol, slNorm, tpNorm, ORDER_TIME_GTC, 0, tr.setupId);
+               sent = m_trade.BuyLimit(lots, entryNorm, m_symbol, slNorm, tpNorm, ORDER_TIME_GTC, 0, orderComment);
             else
-               sent = m_trade.SellLimit(lots, entryNorm, m_symbol, slNorm, tpNorm, ORDER_TIME_GTC, 0, tr.setupId);
+               sent = m_trade.SellLimit(lots, entryNorm, m_symbol, slNorm, tpNorm, ORDER_TIME_GTC, 0, orderComment);
            }
 
          if(sent)
@@ -1191,8 +1280,8 @@ public:
          string errWhy = StringFormat("TRADE_SEND_ERROR_%u", m_trade.ResultRetcode());
          logger.LogTradeEvent("EXEC_ERROR", tr.setupId, 0, tr.direction, lots,
                               entryNorm, slNorm, tpNorm, 0.0, 0.0, 0.0,
-                              tr.score.totalScore, poiSummary, errWhy, qtState, prof.profile);
-         setupEngine.NotifySetupCompleted(tr.direction, errWhy);
+                              tr.score.totalScore, poiSummary, errWhy, qtState, tr.profile);
+         setupEngine.NotifySetupCompleted(tr.direction, errWhy, tr.profile);
          return false;
         }
 
@@ -1203,11 +1292,11 @@ public:
          double riskUsd    = riskMgr.CalcRiskMoneyForVolume(tr.direction, lots, actualFill, slNorm);
          tr.isMarketOrder  = true;
          RegisterManagedPosition(ticket, tr, lots, actualFill, riskUsd, qtState, biasState, atrM5, atrH1);
-         setupEngine.NotifyTradeFilled(tr.direction, ticket, msnr);
+         setupEngine.NotifyTradeFilled(tr.direction, ticket, msnr, tr.profile);
          logger.LogTradeEvent("ENTRY_MARKET", tr.setupId, ticket, tr.direction, lots,
                               actualFill, slNorm, tpNorm, 0.0, 0.0, 0.0,
-                              tr.score.totalScore, poiSummary, "MARKET_FILLED", qtState, prof.profile);
-         setupEngine.NotifySetupCompleted(tr.direction, "IN_TRADE");
+                              tr.score.totalScore, poiSummary, "MARKET_FILLED", qtState, tr.profile);
+         setupEngine.NotifySetupCompleted(tr.direction, "IN_TRADE", tr.profile);
         }
       else
         {
@@ -1215,10 +1304,10 @@ public:
             m_lastArmedBuy = tr;
          else
             m_lastArmedSell = tr;
-         setupEngine.NotifyOrderPlaced(tr.direction, ticket);
+         setupEngine.NotifyOrderPlaced(tr.direction, ticket, tr.profile);
          logger.LogTradeEvent("ORDER_LIMIT_PLACED", tr.setupId, ticket, tr.direction, lots,
                               entryNorm, slNorm, tpNorm, 0.0, 0.0, 0.0,
-                              tr.score.totalScore, poiSummary, "LIMIT_ARMED", qtState, prof.profile);
+                              tr.score.totalScore, poiSummary, "LIMIT_ARMED", qtState, tr.profile);
         }
 
       return true;
@@ -1251,7 +1340,8 @@ public:
         {
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0) continue;
-         if(PositionGetInteger(POSITION_MAGIC) != m_cfg.magicNumber) continue;
+         long posMagic = PositionGetInteger(POSITION_MAGIC);
+         if(!IsOurMagic(posMagic)) continue;
          if(PositionGetString(POSITION_SYMBOL) != m_symbol) continue;
 
          // Register if newly filled from a limit order
@@ -1264,35 +1354,38 @@ public:
             double slP        = PositionGetDouble(POSITION_SL);
             double tpP        = PositionGetDouble(POSITION_TP);
             string comm       = PositionGetString(POSITION_COMMENT);
+            ENUM_TRADE_PROFILE posProf = MagicToProfile(posMagic);
 
             SSetupTracker refTr = (dir == BIAS_BULL ? buyTr : sellTr);
-            if(StringLen(refTr.setupId) == 0)
+            if(StringLen(refTr.setupId) == 0 || refTr.profile != posProf)
               {
                SSetupTracker savedTr = (dir == BIAS_BULL ? m_lastArmedBuy : m_lastArmedSell);
-               if(StringLen(savedTr.setupId) > 0)
+               if(StringLen(savedTr.setupId) > 0 && savedTr.profile == posProf)
                   refTr = savedTr;
                else
                  {
-                  refTr.Reset(dir);
+                  refTr.Reset(dir, posProf);
                   refTr.setupId    = comm;
                   refTr.entryPrice = openP;
                   refTr.slPrice    = slP;
                   refTr.tpPrice    = tpP;
-                  double tp1D      = QTPipsToPrice(m_symbol, (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+                  double tp1Pips   = (posProf == PROFILE_SCALPING ? 50.0 : (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+                  double tp1D      = QTPipsToPrice(m_symbol, tp1Pips);
                   refTr.tp1Price   = (dir == BIAS_BULL ? openP + tp1D : openP - tp1D);
                   double slD       = MathAbs(openP - slP);
                   refTr.rrRatio    = (slD > 1e-5 ? MathAbs(tpP - openP) / slD : 0.0);
                  }
               }
 
+            refTr.profile = posProf;
             double riskUsd = riskMgr.CalcRiskMoneyForVolume(dir, lots, openP, slP);
             RegisterManagedPosition(ticket, refTr, lots, openP, riskUsd, qtState, biasState, atrM5, atrH1);
-            setupEngine.NotifyTradeFilled(dir, ticket, msnr);
+            setupEngine.NotifyTradeFilled(dir, ticket, msnr, posProf);
             string poiStr = QTTfIndexToString(refTr.anchorPOI.tfIdx) + "_" + QTPOITypeToString(refTr.anchorPOI.type);
             logger.LogTradeEvent("ENTRY_LIMIT_FILLED", refTr.setupId, ticket, dir, lots,
                                  openP, slP, tpP, 0.0, 0.0, 0.0,
-                                 refTr.score.totalScore, poiStr, "LIMIT_FILLED", qtState, prof.profile);
-            setupEngine.NotifySetupCompleted(dir, "IN_TRADE");
+                                 refTr.score.totalScore, poiStr, "LIMIT_FILLED", qtState, posProf);
+            setupEngine.NotifySetupCompleted(dir, "IN_TRADE", posProf);
            }
         }
 
@@ -1308,10 +1401,13 @@ public:
             continue;
 
          ulong ticket = m_managed[m].positionTicket;
+         ENUM_TRADE_PROFILE mProf = m_managed[m].profile;
+         m_trade.SetExpertMagicNumber(ProfileToMagic(mProf));
+
          if(!PositionSelectByTicket(ticket))
            {
             // Position was closed by TP, SL, BE, or Manual action -> reconcile & write QT_Forward_Journal.csv!
-            FinalizeAndJournalClosedPosition(m_managed[m], timeEngine, qtState, prof.profile, logger);
+            FinalizeAndJournalClosedPosition(m_managed[m], timeEngine, qtState, mProf, logger);
             continue;
            }
 
@@ -1348,13 +1444,13 @@ public:
             bool timeStopTriggered = false;
             string tsReason        = "";
 
-            if(prof.closeAt90mBlockEnd && m_managed[m].openedBlock90EndNY > 0 &&
+            if(mProf == PROFILE_SCALPING && m_managed[m].openedBlock90EndNY > 0 &&
                qtState.nyTime >= m_managed[m].openedBlock90EndNY - 60)
               {
                timeStopTriggered = true;
-               tsReason          = "TIME_STOP_90M_BLOCK_END";
+               tsReason          = "TIME_STOP_SCALP_90M_END";
               }
-            else if(prof.closeAtDayeDayEnd && m_managed[m].openedDayeEndNY > 0 &&
+            else if(mProf == PROFILE_INTRADAY && m_managed[m].openedDayeEndNY > 0 &&
                     qtState.nyTime >= m_managed[m].openedDayeEndNY - 300) // 17:55 NY (5m before 18:00 NY rollover)
               {
                timeStopTriggered = true;
@@ -1366,28 +1462,55 @@ public:
                if(m_trade.PositionClose(ticket, (ulong)MathMax(0, m_cfg.slippagePoints)))
                  {
                   m_managed[m].lastCloseReason = tsReason;
-                  FinalizeAndJournalClosedPosition(m_managed[m], timeEngine, qtState, prof.profile, logger);
+                  FinalizeAndJournalClosedPosition(m_managed[m], timeEngine, qtState, mProf, logger);
                   continue;
                  }
               }
            }
 
-         // B) Stage-1 Trade Protection: Move SL to Break-Even at +65 Pips (1R protection before TP1)
-         double beTargetPips = (m_cfg.breakEvenPips > 0.0 ? m_cfg.breakEvenPips : 65.0);
-         double beTargetDist = QTPipsToPrice(m_symbol, beTargetPips);
-         double tp1TargetDist = QTPipsToPrice(m_symbol, (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+         // A.2) Stage-0.5 Early Defensive Protection (Protects floating profit >= scalpEarlyBePips e.g. +30 pips / +0.6R)
+         if(m_cfg.useScalpEarlyBE && mProf == PROFILE_SCALPING && !m_managed[m].earlyBeApplied && !m_managed[m].beApplied)
+           {
+            double earlyDist = QTPipsToPrice(m_symbol, m_cfg.scalpEarlyBePips > 0.0 ? m_cfg.scalpEarlyBePips : 30.0);
+            if(profitDist >= earlyDist - 1e-5)
+              {
+               double earlyBuffer = (m_cfg.scalpEarlyBeBufferPts > 0.0 ? m_cfg.scalpEarlyBeBufferPts : 5.0) * point;
+               double earlySL     = (dir == BIAS_BULL ? NormalizeDouble(m_managed[m].entryPrice + earlyBuffer, digits)
+                                                      : NormalizeDouble(m_managed[m].entryPrice - earlyBuffer, digits));
+               bool slImproved    = (dir == BIAS_BULL ? (earlySL > curSL) : (curSL == 0.0 || earlySL < curSL));
+               if(slImproved && m_trade.PositionModify(ticket, earlySL, curTP))
+                 {
+                  m_managed[m].earlyBeApplied = true;
+                  m_managed[m].currentSL      = earlySL;
+                  logger.LogTradeEvent("EARLY_BE_STAGE05", m_managed[m].setupId, ticket, dir, curLots,
+                                       m_managed[m].entryPrice, earlySL, curTP, curPrice,
+                                       curProfit, curR, m_managed[m].confluenceScore,
+                                       m_managed[m].poiSummary, "SL_MOVED_TO_EARLY_BE", qtState, mProf);
+                 }
+              }
+           }
+
+         // B) Stage-1 Trade Protection: Move SL to Break-Even (Scalping: scalpBePips; Intraday/Swing: breakEvenPips)
+         double beTargetPips  = (mProf == PROFILE_SCALPING ? (m_cfg.scalpBePips > 0.0 ? m_cfg.scalpBePips : 45.0)
+                                                           : (m_cfg.breakEvenPips > 0.0 ? m_cfg.breakEvenPips : 65.0));
+         double tp1TargetPips = (mProf == PROFILE_SCALPING ? (m_cfg.scalpPartialPips > 0.0 ? m_cfg.scalpPartialPips : 45.0)
+                                                           : (m_cfg.partialTp1Pips > 0.0 ? m_cfg.partialTp1Pips : 100.0));
+         double beTargetDist  = QTPipsToPrice(m_symbol, beTargetPips);
+         double tp1TargetDist = QTPipsToPrice(m_symbol, tp1TargetPips);
          bool tp1Reached = (profitDist >= tp1TargetDist - 1e-5) ||
                            (m_managed[m].tp1Price > 0.0 &&
                             (dir == BIAS_BULL ? (curPrice >= m_managed[m].tp1Price)
                                               : (curPrice <= m_managed[m].tp1Price)));
          bool beReached  = (profitDist >= beTargetDist - 1e-5) || tp1Reached;
 
-         // C) Stage-2 Mandatory Partial Close (50%) when Running 100 Pips (TP1)!
+         // C) Stage-2 Mandatory Partial Close when Running at TP1!
          if(tp1Reached && m_cfg.usePartialCloseTP1 && !m_managed[m].partialDone)
            {
             if(curLots >= minLot * 2.0)
               {
-               double closeVol = CRiskManager::NormalizeVolume(curLots * m_cfg.partialCloseRatio,
+               double closeRatio = (mProf == PROFILE_SCALPING ? (m_cfg.scalpPartialRatio > 0.0 ? m_cfg.scalpPartialRatio : 0.30)
+                                                              : m_cfg.partialCloseRatio);
+               double closeVol = CRiskManager::NormalizeVolume(curLots * closeRatio,
                                                                minLot, curLots - minLot, stepLot);
                if(closeVol >= minLot && (curLots - closeVol) >= minLot)
                  {
@@ -1395,11 +1518,12 @@ public:
                     {
                      m_managed[m].partialDone = true;
                      curLots -= closeVol;
+                     string partialTag = StringFormat("PARTIAL_AT_%dPIPS", (int)tp1TargetPips);
                      logger.LogTradeEvent("PARTIAL_TP1", m_managed[m].setupId, ticket, dir, closeVol,
                                           m_managed[m].entryPrice, curSL, curTP, curPrice,
-                                          curProfit * m_cfg.partialCloseRatio, curR,
+                                          curProfit * closeRatio, curR,
                                           m_managed[m].confluenceScore, m_managed[m].poiSummary,
-                                          "PARTIAL_50_AT_100PIPS", qtState, prof.profile);
+                                          partialTag, qtState, mProf);
                     }
                  }
                else
@@ -1409,7 +1533,7 @@ public:
                m_managed[m].partialDone = true;
            }
 
-         // Execute Break-Even SL modification once Stage-1 (+65 Pips) or Stage-2 (+100 Pips) is reached
+         // Execute Break-Even SL modification once Stage-1 is reached
          if(beReached && m_cfg.useBreakEvenAt1R && !m_managed[m].beApplied)
            {
             double beBuffer = m_cfg.breakEvenBufferPoints * point;
@@ -1424,7 +1548,26 @@ public:
                logger.LogTradeEvent("BREAK_EVEN_1R", m_managed[m].setupId, ticket, dir, curLots,
                                     m_managed[m].entryPrice, newSL, curTP, curPrice,
                                     curProfit, curR, m_managed[m].confluenceScore,
-                                    m_managed[m].poiSummary, "SL_MOVED_TO_BE", qtState, prof.profile);
+                                    m_managed[m].poiSummary, "SL_MOVED_TO_BE", qtState, mProf);
+              }
+           }
+
+         // D) Scalping Profile: Full TP Close
+         if(mProf == PROFILE_SCALPING)
+           {
+            double scalpTpPips = (m_cfg.scalpFinalTpPips > 0.0 ? m_cfg.scalpFinalTpPips : 100.0);
+            double scalpTpDist = QTPipsToPrice(m_symbol, scalpTpPips);
+            if(profitDist >= scalpTpDist - 1e-5 ||
+               (m_managed[m].finalTP > 0.0 &&
+                (dir == BIAS_BULL ? curPrice >= m_managed[m].finalTP - 1e-5
+                                  : curPrice <= m_managed[m].finalTP + 1e-5)))
+              {
+               if(m_trade.PositionClose(ticket, (ulong)MathMax(0, m_cfg.slippagePoints)))
+                 {
+                  m_managed[m].lastCloseReason = StringFormat("SCALP_TP_%dPIPS", (int)scalpTpPips);
+                  FinalizeAndJournalClosedPosition(m_managed[m], timeEngine, qtState, mProf, logger);
+                  continue;
+                 }
               }
            }
         }

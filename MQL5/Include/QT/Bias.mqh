@@ -116,6 +116,8 @@ struct SBiasState
    bool             allowSell;
    bool             allowBuyCycle;       // v1.21: Daily AMDX/XAMD cycle-only gate (separate from HTF gate)
    bool             allowSellCycle;      // v1.21: Daily AMDX/XAMD cycle-only gate (separate from HTF gate)
+   bool             allowBuyScalp;       // v1.30: Scalping gate (H4 bias / structure aligned)
+   bool             allowSellScalp;      // v1.30: Scalping gate (H4 bias / structure aligned)
    ENUM_BIAS_DIR    storylineDir;        // Dominant direction (BIAS_BULL, BIAS_BEAR, or BIAS_NEUTRAL)
 
    // Daily AMDX / XAMD Cycle & ERL <-> IRL Narrative State
@@ -148,6 +150,8 @@ struct SBiasState
       allowSell           = false;
       allowBuyCycle       = false;
       allowSellCycle      = false;
+      allowBuyScalp       = false;
+      allowSellScalp      = false;
       storylineDir        = BIAS_NEUTRAL;
       dailyCycle.Reset();
       bullDOL.Reset();
@@ -804,6 +808,10 @@ public:
             m_state.allowSellCycle = true;
            }
         }
+
+      // Scalping Bias Gate (v1.30): H4 bias or structure aligned
+      m_state.allowBuyScalp  = (m_state.biasH4 == BIAS_BULL || (m_state.biasH4 == BIAS_NEUTRAL && m_state.structH4 == BIAS_BULL));
+      m_state.allowSellScalp = (m_state.biasH4 == BIAS_BEAR || (m_state.biasH4 == BIAS_NEUTRAL && m_state.structH4 == BIAS_BEAR));
 
       if(m_state.allowBuy && !m_state.allowSell)
          m_state.storylineDir = BIAS_BULL;

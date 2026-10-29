@@ -152,6 +152,37 @@ struct SMSSResult
      }
   };
 
+//+------------------------------------------------------------------+
+//| Change in State of Delivery (CISD) Result Struct (v1.31)         |
+//| Confirms institutional order flow shift when candle body closes  |
+//| beyond the opening price of the extreme delivery leg.            |
+//+------------------------------------------------------------------+
+struct SCISDResult
+  {
+   bool          confirmed;        // True if body close broke opening price of delivery leg
+   ENUM_BIAS_DIR direction;        // BIAS_BULL or BIAS_BEAR
+   int           tfIdx;            // Timeframe of CISD (e.g. TF_IDX_M5)
+   datetime      cisdBarTime;      // Time of displacement candle that confirmed CISD
+   int           cisdClosedShift;  // Closed shift of CISD candle
+   double        deliveryOpenPrice;// Opening price of the invalidated delivery series
+   datetime      deliveryStartTime;// Bar time where the delivery run started
+   double        orderBlockHigh;   // High of the series of candles broken (OB)
+   double        orderBlockLow;    // Low of the series of candles broken (OB)
+
+   void Reset()
+     {
+      confirmed         = false;
+      direction         = BIAS_NEUTRAL;
+      tfIdx             = TF_IDX_M5;
+      cisdBarTime       = 0;
+      cisdClosedShift   = 0;
+      deliveryOpenPrice = 0.0;
+      deliveryStartTime = 0;
+      orderBlockHigh    = 0.0;
+      orderBlockLow     = 0.0;
+     }
+  };
+
 struct SFVGZone
   {
    string          id;
@@ -617,6 +648,147 @@ public:
             outMss.mssClosedShift   = idx + 1;
             outMss.brokenSwingPrice = oppSwing.price;
             outMss.brokenSwingTime  = oppSwing.pivotTime;
+            return true;
+           }
+        }
+
+      return false;
+     }
+
+   //+------------------------------------------------------------------+
+   //| 4b. Check Change in State of Delivery (CISD) after Sweep or POI  |
+   //|     Body close breaks opening price of delivery leg into extreme |
+   //+------------------------------------------------------------------+
+   static bool       CheckCISDAfterSweepOrTouch(const MqlRates &rates[],
+                                                const int ratesCount,
+                                                const datetime anchorTime,
+                                                const ENUM_BIAS_DIR signalDir,
+                                                const int tfIdx,
+                                                SCISDResult &outCisd)
+     {
+      outCisd.Reset();
+      if(ratesCount <= 2 || anchorTime <= 0 || signalDir == BIAS_NEUTRAL)
+         return false;
+
+      // 1. Locate anchor bar in series (rates[0] is newest closed bar)
+      int anchorIdx = -1;
+      for(int i = 0; i < ratesCount; i++)
+        {
+         if(rates[i].time <= anchorTime)
+           {
+            anchorIdx = i;
+            break;
+           }
+        }
+      if(anchorIdx < 0 || anchorIdx >= ratesCount - 1)
+         return false;
+
+      // 2. Identify extreme bar in local window around anchor (0 to 3 bars older)
+      int searchLimit = MathMin(ratesCount - 1, anchorIdx + 3);
+      int extremeIdx  = anchorIdx;
+
+      if(signalDir == BIAS_BULL)
+        {
+         for(int i = anchorIdx; i <= searchLimit; i++)
+           {
+            if(rates[i].low < rates[extremeIdx].low)
+               extremeIdx = i;
+           }
+        }
+      else
+        {
+         for(int i = anchorIdx; i <= searchLimit; i++)
+           {
+            if(rates[i].high > rates[extremeIdx].high)
+               extremeIdx = i;
+           }
+        }
+
+      // 3. Find opening price of the delivery leg leading into extremeIdx
+      // Look back 1 to 6 bars from extremeIdx for the sequence of opposing candles
+      double deliveryOpen = 0.0;
+      datetime deliveryStart = 0;
+      double obHigh = rates[extremeIdx].high;
+      double obLow  = rates[extremeIdx].low;
+
+      int maxLegBars = MathMin(ratesCount - 1, extremeIdx + 6);
+      int lastLegIdx = extremeIdx;
+
+      if(signalDir == BIAS_BULL)
+        {
+         // Bullish CISD: delivery was bearish (down-close candles)
+         for(int i = extremeIdx; i <= maxLegBars; i++)
+           {
+            if(rates[i].close <= rates[i].open) // Down-close or doji
+              {
+               lastLegIdx = i;
+               if(rates[i].high > obHigh) obHigh = rates[i].high;
+               if(rates[i].low < obLow)   obLow  = rates[i].low;
+              }
+            else
+              {
+               break;
+              }
+           }
+         deliveryOpen  = rates[lastLegIdx].open;
+         deliveryStart = rates[lastLegIdx].time;
+         if(rates[lastLegIdx].high > obHigh) obHigh = rates[lastLegIdx].high;
+        }
+      else
+        {
+         // Bearish CISD: delivery was bullish (up-close candles)
+         for(int i = extremeIdx; i <= maxLegBars; i++)
+           {
+            if(rates[i].close >= rates[i].open) // Up-close or doji
+              {
+               lastLegIdx = i;
+               if(rates[i].high > obHigh) obHigh = rates[i].high;
+               if(rates[i].low < obLow)   obLow  = rates[i].low;
+              }
+            else
+              {
+               break;
+              }
+           }
+         deliveryOpen  = rates[lastLegIdx].open;
+         deliveryStart = rates[lastLegIdx].time;
+         if(rates[lastLegIdx].low < obLow) obLow = rates[lastLegIdx].low;
+        }
+
+      if(deliveryOpen <= 0.0)
+         return false;
+
+      // 4. Scan forward from extremeIdx - 1 towards newest bar (0) for displacement body close
+      for(int idx = extremeIdx - 1; idx >= 0; idx--)
+        {
+         if(rates[idx].time <= rates[extremeIdx].time)
+            continue;
+
+         if(signalDir == BIAS_BULL && rates[idx].close > deliveryOpen)
+           {
+            outCisd.confirmed         = true;
+            outCisd.direction         = BIAS_BULL;
+            outCisd.tfIdx             = tfIdx;
+            outCisd.cisdBarTime       = rates[idx].time;
+            outCisd.cisdClosedShift   = idx + 1;
+            outCisd.deliveryOpenPrice = deliveryOpen;
+            outCisd.deliveryStartTime = deliveryStart;
+            outCisd.orderBlockHigh    = obHigh;
+            outCisd.orderBlockLow     = obLow;
+            return true;
+           }
+
+         if(signalDir == BIAS_BEAR && rates[idx].close < deliveryOpen)
+           {
+            outCisd.confirmed         = true;
+            outCisd.direction         = BIAS_BEAR;
+            outCisd.tfIdx             = tfIdx;
+            outCisd.cisdBarTime       = rates[idx].time;
+            outCisd.cisdClosedShift   = idx + 1;
+            outCisd.deliveryOpenPrice = deliveryOpen;
+            outCisd.deliveryStartTime = deliveryStart;
+            outCisd.orderBlockHigh    = obHigh;
+            outCisd.orderBlockLow     = obLow;
             return true;
            }
         }

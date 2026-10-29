@@ -371,7 +371,7 @@ public:
                 TimeToString(qtState.nyTime, TIME_DATE | TIME_SECONDS),
                 dayeDate,
                 QTDayOfWeekToString(qtState.dayeDayOfWeek),
-                QTProfileToString(prof.profile),
+                QTProfileToString(tr.profile),
                 CleanCsvField(tr.setupId),
                 QTBiasToString(tr.direction),
                 QTSetupStateToString(tr.state),

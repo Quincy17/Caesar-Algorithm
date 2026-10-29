@@ -686,6 +686,11 @@ public:
                                      outState.isSessionAllowed &&
                                      outState.isQ90Allowed &&
                                      !outState.isFridayCutoffPassed);
+
+      // v1.30: Scalping active on London & NY AM during Q2 Judas & Q3 Expansion blocks (Mon-Fri)
+      outState.isScalpTimeAllowed = ((outState.session == QT_SESSION_LONDON || outState.session == QT_SESSION_NY_AM) &&
+                                     (outState.q90 == QT_Q2 || outState.q90 == QT_Q3) &&
+                                     !outState.isFridayCutoffPassed);
      }
 
    //--- Update internal state for serverTime and return copy
